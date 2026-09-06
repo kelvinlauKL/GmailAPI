@@ -3,26 +3,16 @@ public struct GmailProfile: Decodable, Equatable, Sendable {
   /// The account's email address.
   public let emailAddress: String
 
-  /// The total number of messages in the mailbox.
+  /// The total number of messages across the entire mailbox at fetch time.
+  /// This is not limited to the app's search results or imported messages.
   public let messagesTotal: Int
 
-  /// The total number of conversations in the mailbox.
+  /// The total number of conversations across the entire mailbox at fetch time.
+  /// A conversation can contain multiple messages.
   public let threadsTotal: Int
 
   /// The current mailbox history cursor, preserved as an opaque string.
   public let historyID: String
-
-  public init(
-    emailAddress: String,
-    messagesTotal: Int,
-    threadsTotal: Int,
-    historyID: String
-  ) {
-    self.emailAddress = emailAddress
-    self.messagesTotal = messagesTotal
-    self.threadsTotal = threadsTotal
-    self.historyID = historyID
-  }
 
   private enum CodingKeys: String, CodingKey {
     case emailAddress
