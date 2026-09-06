@@ -25,7 +25,7 @@ public struct GmailThreadListRequest: Equatable, Sendable {
     labelIds: [String] = [],
     includeSpamTrash: Bool = false
   ) throws {
-    guard (Constant.min...Constant.max).contains(maxResults) else {
+    guard (Constant.minimumPageSize...Constant.maximumPageSize).contains(maxResults) else {
       throw ValidationError.invalidMaxResults(maxResults)
     }
 
@@ -52,8 +52,8 @@ public struct GmailThreadListRequest: Equatable, Sendable {
   }
 
   public enum Constant {
-    public static let min: Int = 1
-    public static let max: Int = 500
+    public static let minimumPageSize: Int = 1
+    public static let maximumPageSize: Int = 500
     public static let defaultPageSize: Int = 100
   }
 
@@ -62,17 +62,17 @@ public struct GmailThreadListRequest: Equatable, Sendable {
 
     public var errorDescription: String? {
       switch self {
-      case .invalidMaxResults(let value):
-        return "Cannot list threads with a page size of \(value)."
+      case .invalidMaxResults(let invalidPageSize):
+        return "Cannot list threads with a page size of \(invalidPageSize)."
       }
     }
 
     public var failureReason: String? {
-      "The page size must be positive and cannot exceed Gmail's limit of \(Constant.max) threads."
+      "The page size must be positive and cannot exceed Gmail's limit of \(Constant.maximumPageSize) threads."
     }
 
     public var recoverySuggestion: String? {
-      "Set maxResults to a value from \(Constant.min) through \(Constant.max) and try again."
+      "Set maxResults to a value from \(Constant.minimumPageSize) through \(Constant.maximumPageSize) and try again."
     }
   }
 }
