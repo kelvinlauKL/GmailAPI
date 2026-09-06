@@ -1,5 +1,6 @@
-/// Connects Gmail requests to the host application's account credentials.
-/// The host owns credential storage, token expiry, and coordinated refresh.
+/// Supplies access tokens for one Google account.
+/// Implementations manage token expiry and coordinated refresh. The host owns
+/// interactive sign-in and persistent credential storage.
 public protocol GmailTokenProvider: Sendable {
   /// Returns a current, nonempty access token without whitespace or the `Bearer` prefix.
   /// Refresh expired credentials as needed, coordinating concurrent refresh requests.
