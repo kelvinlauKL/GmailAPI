@@ -188,6 +188,167 @@ struct GmailClientTests {
     #expect(await tokenProvider.invalidatedTokens.count == (stage == .invalidation ? 1 : 0))
   }
 
+  @Test
+  func listsOneAuthenticatedPageWithDefaultOptions() async throws {
+    let tokenProvider = TokenProvider()
+    let transport = Transport(responseBody: """
+      {
+        "threads":[{"id":"thread-1","snippet":"Preview","historyId":"123"},{"id":"thread-2"}],
+        "nextPageToken":"next-page", "resultSizeEstimate":42
+      }
+      """)
+    let client = GmailClient(tokenProvider: tokenProvider, transport: transport)
+    let options = try GmailThreadListRequest()
+
+    let page = try await client.listThreads(options)
+
+    #expect(page.threads?.map(\.id) == ["thread-1", "thread-2"])
+    #expect(page.threads?.first?.snippet == "Preview")
+    #expect(page.threads?.first?.historyId == "123")
+    #expect(page.nextPageToken == "next-page")
+    #expect(page.resultSizeEstimate == 42)
+    let requests = await transport.requests
+    let request = try #require(requests.first)
+    let url = try #require(request.url)
+    #expect(requests.count == 1)
+    #expect(url.scheme == "https")
+    #expect(url.host == "gmail.googleapis.com")
+    #expect(url.path == "/gmail/v1/users/me/threads")
+    #expect(request.httpMethod == "GET")
+    #expect(request.httpBody == nil)
+    #expect(request.value(forHTTPHeaderField: "Authorization") == "Bearer first-token")
+    #expect(request.value(forHTTPHeaderField: "Accept") == "application/json")
+    #expect(try decodedQueryItems(in: url) == [
+      URLQueryItem(name: "maxResults", value: "100"),
+      URLQueryItem(name: "includeSpamTrash", value: "false")
+    ])
+  }
+
+  @Test
+  func preservesThreadFiltersAndPageTokenAcrossAuthenticationRetry() async throws {
+    let tokenProvider = TokenProvider(tokens: ["rejected-token", "replacement-token"])
+    let transport = Transport(statusCodes: [401, 200], responseBody: "{}")
+    let client = GmailClient(tokenProvider: tokenProvider, transport: transport)
+    let query = #"from:alice+tag@example.com subject:"A&B #1" 雪 %2B"#
+    let pageToken = "page+/=%2F&next=2#雪"
+    let labelIDs = ["INBOX", "Label_+/%2F&?="]
+    let options = try GmailThreadListRequest(
+      q: query, maxResults: 250, pageToken: pageToken,
+      labelIds: labelIDs, includeSpamTrash: true
+    )
+
+    _ = try await client.listThreads(options)
+
+    let requests = await transport.requests
+    let url = try #require(requests.first?.url)
+    let urlComponents = try #require(URLComponents(url: url, resolvingAgainstBaseURL: false))
+    let encodedQuery = try #require(urlComponents.percentEncodedQuery)
+    #expect(!encodedQuery.contains("+"))
+    #expect(encodedQuery.contains("%2B"))
+    #expect(try decodedQueryItems(in: url) == [
+      URLQueryItem(name: "maxResults", value: "250"),
+      URLQueryItem(name: "includeSpamTrash", value: "true"),
+      URLQueryItem(name: "q", value: query),
+      URLQueryItem(name: "pageToken", value: pageToken),
+      URLQueryItem(name: "labelIds", value: labelIDs[0]),
+      URLQueryItem(name: "labelIds", value: labelIDs[1])
+    ])
+    #expect(requests.count == 2)
+    #expect(requests.first?.url == requests.last?.url)
+    #expect(requests.map { $0.value(forHTTPHeaderField: "Authorization") } == [
+      "Bearer rejected-token", "Bearer replacement-token"
+    ])
+    #expect(await tokenProvider.invalidatedTokens == ["rejected-token"])
+  }
+
+  @Test
+  func fetchesNextThreadPageOnlyWhenRequested() async throws {
+    let tokenProvider = TokenProvider()
+    let transport = Transport(responseBody: #"{"threads":[{"id":"first"}],"nextPageToken":"next+/=%2F"}"#)
+    let client = GmailClient(tokenProvider: tokenProvider, transport: transport)
+    let firstOptions = try GmailThreadListRequest(q: "is:unread")
+
+    let firstPage = try await client.listThreads(firstOptions)
+
+    #expect(await transport.requests.count == 1)
+    let nextPageToken = try #require(firstPage.nextPageToken)
+    await transport.setResponseBody(#"{"threads":[{"id":"second"}]}"#)
+    let nextOptions = try GmailThreadListRequest(q: "is:unread", pageToken: nextPageToken)
+    let secondPage = try await client.listThreads(nextOptions)
+
+    #expect(firstPage.threads?.map(\.id) == ["first"])
+    #expect(secondPage.threads?.map(\.id) == ["second"])
+    #expect(secondPage.nextPageToken == nil)
+    let requests = await transport.requests
+    let nextURL = try #require(requests.last?.url)
+    let queryItems = try decodedQueryItems(in: nextURL)
+    #expect(queryItems.contains(URLQueryItem(name: "pageToken", value: "next+/=%2F")))
+    #expect(queryItems.contains(URLQueryItem(name: "q", value: "is:unread")))
+    #expect(requests.count == 2)
+  }
+
+  @Test(arguments: ["{}", #"{"threads":[],"resultSizeEstimate":0}"#, #"{"threads":null,"nextPageToken":null}"#])
+  func acceptsEmptyThreadPages(responseBody: String) async throws {
+    let transport = Transport(responseBody: responseBody)
+    let client = GmailClient(tokenProvider: TokenProvider(), transport: transport)
+    let options = try GmailThreadListRequest()
+
+    let page = try await client.listThreads(options)
+
+    #expect(page.threads?.isEmpty ?? true)
+    #expect(page.nextPageToken == nil)
+    #expect(await transport.requests.count == 1)
+  }
+
+  @Test(arguments: ["not json", #"{"threads":{}}"#, #"{"nextPageToken":123}"#])
+  func rejectsMalformedThreadPagesWithoutRetry(responseBody: String) async throws {
+    let transport = Transport(responseBody: responseBody)
+    let client = GmailClient(tokenProvider: TokenProvider(), transport: transport)
+    let options = try GmailThreadListRequest()
+
+    await #expect(throws: GmailClient.RequestError.invalidResponse) {
+      try await client.listThreads(options)
+    }
+    #expect(await transport.requests.count == 1)
+  }
+
+  @Test(arguments: [403, 429])
+  func preservesThreadListingHTTPFailures(statusCode: Int) async throws {
+    let tokenProvider = TokenProvider()
+    let transport = Transport(statusCodes: [statusCode], responseBody: "{}")
+    let client = GmailClient(tokenProvider: tokenProvider, transport: transport)
+    let options = try GmailThreadListRequest()
+
+    await #expect(throws: GmailClient.RequestError.requestFailed(statusCode: statusCode)) {
+      try await client.listThreads(options)
+    }
+    #expect(await transport.requests.count == 1)
+    #expect(await tokenProvider.invalidatedTokens.isEmpty)
+  }
+
+  @Test
+  func finalRejectionRemainsAuthenticationErrorWhenInvalidationIsCancelled() async throws {
+    let tokenProvider = TokenProvider(cancellationStage: .invalidation, cancellationInvalidationCount: 2)
+    let transport = Transport(statusCodes: [401, 401, 200])
+    let client = GmailClient(tokenProvider: tokenProvider, transport: transport)
+    let requestTask = Task { try await client.profile() }
+
+    await #expect(throws: GmailClient.RequestError.reauthorizationRequired) {
+      try await requestTask.value
+    }
+    #expect(await transport.requests.count == 2)
+    #expect(await tokenProvider.invalidatedTokens.count == 2)
+  }
+
+  private func decodedQueryItems(in url: URL) throws -> [URLQueryItem] {
+    let urlComponents = try #require(URLComponents(url: url, resolvingAgainstBaseURL: false))
+    let encodedQuery = try #require(urlComponents.percentEncodedQuery)
+    var decodedComponents = URLComponents()
+    // Match a query decoder that treats literal plus signs as spaces.
+    decodedComponents.percentEncodedQuery = encodedQuery.replacingOccurrences(of: "+", with: "%20")
+    return try #require(decodedComponents.queryItems)
+  }
+
   enum CancellationStage: CaseIterable, Sendable {
     case beforeCredentials, credentials, response, invalidation
   }
@@ -204,17 +365,20 @@ struct GmailClientTests {
     private let tokens: [String]
     private let failure: DependencyFailure?
     private let cancellationStage: CancellationStage?
+    private let cancellationInvalidationCount: Int
     private(set) var retrievalCount = 0
     private(set) var invalidatedTokens: [String] = []
 
     init(
       tokens: [String] = ["first-token"],
       failure: DependencyFailure? = nil,
-      cancellationStage: CancellationStage? = nil
+      cancellationStage: CancellationStage? = nil,
+      cancellationInvalidationCount: Int = 1
     ) {
       self.tokens = tokens
       self.failure = failure
       self.cancellationStage = cancellationStage
+      self.cancellationInvalidationCount = cancellationInvalidationCount
     }
 
     func accessToken() async throws -> String {
@@ -230,7 +394,7 @@ struct GmailClientTests {
     func invalidate(rejectedAccessToken: String) async throws {
       invalidatedTokens.append(rejectedAccessToken)
       if failure == .invalidation { throw DependencyFailure.invalidation }
-      if cancellationStage == .invalidation {
+      if cancellationStage == .invalidation, invalidatedTokens.count == cancellationInvalidationCount {
         withUnsafeCurrentTask { currentTask in currentTask?.cancel() }
       }
     }
@@ -238,7 +402,7 @@ struct GmailClientTests {
 
   private actor Transport: GmailTransport {
     private let statusCodes: [Int]
-    private let responseBody: String
+    private var responseBody: String
     private let failure: DependencyFailure?
     private let cancellationStage: CancellationStage?
     private(set) var requests: [URLRequest] = []
@@ -255,6 +419,10 @@ struct GmailClientTests {
       self.responseBody = responseBody
       self.failure = failure
       self.cancellationStage = cancellationStage
+    }
+
+    func setResponseBody(_ responseBody: String) {
+      self.responseBody = responseBody
     }
 
     func send(_ request: URLRequest) async throws -> (data: Data, response: HTTPURLResponse) {

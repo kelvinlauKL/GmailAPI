@@ -20,14 +20,29 @@ public struct GmailClient: Sendable {
   /// A rejected access token is invalidated, with one retry using newly requested credentials.
   /// Other HTTP failures are returned without retrying. Provider and transport errors propagate.
   public func profile() async throws -> GmailProfile {
-    let data = try await get(Constant.profileEndpoint)
-    guard let profile = try? JSONDecoder().decode(GmailProfile.self, from: data) else {
-      throw RequestError.invalidResponse
-    }
-    return profile
+    try await get(Constant.profileEndpoint)
   }
 
-  private func get(_ url: URL, canRetryAuthentication: Bool = true) async throws -> Data {
+  /// Fetches one page of thread references using the supplied search and pagination options.
+  /// Pass the returned `nextPageToken` in a subsequent request to fetch another page.
+  /// Uses the same authentication retry and error handling as `profile()`.
+  public func listThreads(_ request: GmailThreadListRequest) async throws -> GmailThreadListResponse {
+    guard var urlComponents = URLComponents(
+      url: Constant.threadListEndpoint, resolvingAgainstBaseURL: false
+    ) else {
+      throw RequestError.invalidRequestURL
+    }
+    urlComponents.queryItems = request.queryItems
+    // Query decoders can interpret literal plus signs as spaces.
+    urlComponents.percentEncodedQuery = urlComponents.percentEncodedQuery?
+      .replacingOccurrences(of: "+", with: "%2B")
+    guard let url = urlComponents.url else { throw RequestError.invalidRequestURL }
+    return try await get(url)
+  }
+
+  private func get<Response: Decodable>(
+    _ url: URL, canRetryAuthentication: Bool = true
+  ) async throws -> Response {
     try Task.checkCancellation()
     let accessToken = try await tokenProvider.accessToken()
     try Task.checkCancellation()
@@ -44,23 +59,27 @@ public struct GmailClient: Sendable {
     try Task.checkCancellation()
     if response.statusCode == Constant.unauthorizedStatusCode {
       try await tokenProvider.invalidate(rejectedAccessToken: accessToken)
-      try Task.checkCancellation()
       guard canRetryAuthentication else { throw RequestError.reauthorizationRequired }
       return try await get(url, canRetryAuthentication: false)
     }
     guard response.statusCode == Constant.successStatusCode else {
       throw RequestError.requestFailed(statusCode: response.statusCode)
     }
-    return data
+    guard let decodedResponse = try? JSONDecoder().decode(Response.self, from: data) else {
+      throw RequestError.invalidResponse
+    }
+    return decodedResponse
   }
 
   private enum Constant {
     static let profileEndpoint: URL = URL(string: "https://gmail.googleapis.com/gmail/v1/users/me/profile")!
+    static let threadListEndpoint: URL = URL(string: "https://gmail.googleapis.com/gmail/v1/users/me/threads")!
     static let successStatusCode: Int = 200
     static let unauthorizedStatusCode: Int = 401
   }
 
   public enum RequestError: LocalizedError, Equatable {
+    case invalidRequestURL
     case invalidAccessToken
     case reauthorizationRequired
     case requestFailed(statusCode: Int)
@@ -68,6 +87,7 @@ public struct GmailClient: Sendable {
 
     public var errorDescription: String? {
       switch self {
+      case .invalidRequestURL: "The Gmail request URL could not be constructed."
       case .invalidAccessToken: "The credential provider returned an invalid access token."
       case .reauthorizationRequired: "Google sign-in is required."
       case .requestFailed(let statusCode): "The Gmail request failed with HTTP status \(statusCode)."
@@ -77,6 +97,7 @@ public struct GmailClient: Sendable {
 
     public var failureReason: String? {
       switch self {
+      case .invalidRequestURL: "The request parameters could not be encoded into a valid URL."
       case .invalidAccessToken: "The access token was empty or contained whitespace."
       case .reauthorizationRequired: "Gmail rejected the credentials after an authentication retry."
       case .requestFailed: "Gmail did not return the expected successful HTTP status."
@@ -86,6 +107,7 @@ public struct GmailClient: Sendable {
 
     public var recoverySuggestion: String? {
       switch self {
+      case .invalidRequestURL: "Check the request parameters and URL construction before retrying."
       case .invalidAccessToken: "Provide a current access token without whitespace or the Bearer prefix."
       case .reauthorizationRequired: "Sign in again and supply a provider with the new credentials."
       case .requestFailed: "Check the HTTP status, account permissions, quota, and service availability before retrying."
