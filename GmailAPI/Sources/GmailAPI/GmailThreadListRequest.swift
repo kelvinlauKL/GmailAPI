@@ -6,7 +6,7 @@ public struct GmailThreadListRequest: Equatable, Sendable {
   /// An empty string applies no search filter; other request options still apply.
   public let q: String
 
-  /// Maximum threads per page. This request accepts values from 1 through 500.
+  /// Maximum threads per page, within the bounds defined by `Constant`.
   public let maxResults: Int
 
   /// The opaque `nextPageToken` returned by the preceding response.
@@ -20,12 +20,12 @@ public struct GmailThreadListRequest: Equatable, Sendable {
 
   public init(
     q: String = "",
-    maxResults: Int = 100,
+    maxResults: Int = Constant.defaultPageSize,
     pageToken: String? = nil,
     labelIds: [String] = [],
     includeSpamTrash: Bool = false
   ) throws {
-    guard (1...500).contains(maxResults) else {
+    guard (Constant.min...Constant.max).contains(maxResults) else {
       throw ValidationError.invalidMaxResults(maxResults)
     }
 
@@ -51,6 +51,12 @@ public struct GmailThreadListRequest: Equatable, Sendable {
     return items
   }
 
+  public enum Constant {
+    public static let min: Int = 1
+    public static let max: Int = 500
+    public static let defaultPageSize: Int = 100
+  }
+
   public enum ValidationError: LocalizedError, Equatable {
     case invalidMaxResults(Int)
 
@@ -62,11 +68,11 @@ public struct GmailThreadListRequest: Equatable, Sendable {
     }
 
     public var failureReason: String? {
-      "The page size must be positive and cannot exceed Gmail's limit of 500 threads."
+      "The page size must be positive and cannot exceed Gmail's limit of \(Constant.max) threads."
     }
 
     public var recoverySuggestion: String? {
-      "Set maxResults to a value from 1 through 500 and try again."
+      "Set maxResults to a value from \(Constant.min) through \(Constant.max) and try again."
     }
   }
 }
