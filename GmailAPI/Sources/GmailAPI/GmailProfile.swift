@@ -12,12 +12,5 @@ public struct GmailProfile: Decodable, Equatable, Sendable {
   public let threadsTotal: Int
 
   /// The current mailbox history cursor, preserved as an opaque string.
-  public let historyID: String
-
-  private enum CodingKeys: String, CodingKey {
-    case emailAddress
-    case messagesTotal
-    case threadsTotal
-    case historyID = "historyId"
-  }
+  public let historyId: String
 }
