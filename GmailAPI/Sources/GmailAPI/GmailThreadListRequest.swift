@@ -3,7 +3,8 @@ import Foundation
 /// Search and pagination options for Gmail's `users.threads.list` endpoint.
 public struct GmailThreadListRequest: Equatable, Sendable {
   /// Gmail search syntax, such as `from:manager@example.com`.
-  public let q: String?
+  /// An empty string applies no search filter; other request options still apply.
+  public let q: String
 
   /// Maximum threads per page. This request accepts values from 1 through 500.
   public let maxResults: Int
@@ -18,7 +19,7 @@ public struct GmailThreadListRequest: Equatable, Sendable {
   public let includeSpamTrash: Bool
 
   public init(
-    q: String? = nil,
+    q: String = "",
     maxResults: Int = 100,
     pageToken: String? = nil,
     labelIds: [String] = [],
@@ -40,7 +41,7 @@ public struct GmailThreadListRequest: Equatable, Sendable {
       URLQueryItem(name: "maxResults", value: String(maxResults)),
       URLQueryItem(name: "includeSpamTrash", value: String(includeSpamTrash))
     ]
-    if let q {
+    if !q.isEmpty {
       items.append(URLQueryItem(name: "q", value: q))
     }
     if let pageToken {
@@ -50,7 +51,22 @@ public struct GmailThreadListRequest: Equatable, Sendable {
     return items
   }
 
-  public enum ValidationError: Error, Equatable {
+  public enum ValidationError: LocalizedError, Equatable {
     case invalidMaxResults(Int)
+
+    public var errorDescription: String? {
+      switch self {
+      case .invalidMaxResults(let value):
+        return "Cannot list threads with a page size of \(value)."
+      }
+    }
+
+    public var failureReason: String? {
+      "The page size must be positive and cannot exceed Gmail's limit of 500 threads."
+    }
+
+    public var recoverySuggestion: String? {
+      "Set maxResults to a value from 1 through 500 and try again."
+    }
   }
 }

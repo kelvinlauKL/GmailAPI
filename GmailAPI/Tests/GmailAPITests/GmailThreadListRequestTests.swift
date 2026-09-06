@@ -7,7 +7,7 @@ struct GmailThreadListRequestTests {
   func defaultsToFirstPageWithoutFilters() throws {
     let request = try GmailThreadListRequest()
 
-    #expect(request.q == nil)
+    #expect(request.q.isEmpty)
     #expect(request.maxResults == 100)
     #expect(request.pageToken == nil)
     #expect(request.labelIds.isEmpty)
@@ -33,6 +33,15 @@ struct GmailThreadListRequestTests {
     #expect(throws: GmailThreadListRequest.ValidationError.invalidMaxResults(maxResults)) {
       try GmailThreadListRequest(maxResults: maxResults)
     }
+  }
+
+  @Test
+  func explainsInvalidPageSizeAndHowToRecover() {
+    let error: any LocalizedError = GmailThreadListRequest.ValidationError.invalidMaxResults(501)
+
+    #expect(error.localizedDescription == "Cannot list threads with a page size of 501.")
+    #expect(error.failureReason == "The page size must be positive and cannot exceed Gmail's limit of 500 threads.")
+    #expect(error.recoverySuggestion == "Set maxResults to a value from 1 through 500 and try again.")
   }
 
   @Test
