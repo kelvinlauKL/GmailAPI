@@ -327,6 +327,126 @@ struct GmailClientTests {
   }
 
   @Test
+  func fetchesAndDecodesAuthenticatedFullThread() async throws {
+    let tokenProvider = TokenProvider()
+    let transport = Transport(responseBody: """
+      {
+        "id":"thread-1", "historyId":"123", "snippet":"Hello",
+        "messages":[
+          {"id":"message-1","threadId":"thread-1",
+           "payload":{"mimeType":"text/plain","body":{"size":5,"data":"SGVsbG8="}}},
+          {"id":"message-2","threadId":"thread-1"}
+        ]
+      }
+      """)
+    let client = GmailClient(tokenProvider: tokenProvider, transport: transport)
+
+    let thread = try await client.thread(id: "thread-1")
+
+    #expect(thread.id == "thread-1")
+    #expect(thread.historyId == "123")
+    #expect(thread.snippet == "Hello")
+    #expect(thread.messages.map(\.id) == ["message-1", "message-2"])
+    #expect(thread.messages.first?.payload?.body?.data == "SGVsbG8=")
+    let requests = await transport.requests
+    let request = try #require(requests.first)
+    #expect(requests.count == 1)
+    #expect(request.url?.absoluteString == "https://gmail.googleapis.com/gmail/v1/users/me/threads/thread-1?format=full")
+    #expect(request.httpMethod == "GET")
+    #expect(request.httpBody == nil)
+    #expect(request.value(forHTTPHeaderField: "Authorization") == "Bearer first-token")
+    #expect(request.value(forHTTPHeaderField: "Accept") == "application/json")
+    #expect(await tokenProvider.retrievalCount == 1)
+    #expect(await tokenProvider.invalidatedTokens.isEmpty)
+  }
+
+  @Test(arguments: [
+    "a/b", "../profile", #"..\profile"#, "%2E%2E", "https://other.example/path",
+    "thread+/%2F?format=minimal&userId=other#雪 space"
+  ])
+  func encodesThreadIDAsSinglePathSegment(threadID: String) async throws {
+    let transport = Transport(responseBody: #"{"id":"thread-1","messages":[]}"#)
+    let client = GmailClient(tokenProvider: TokenProvider(), transport: transport)
+
+    _ = try await client.thread(id: threadID)
+
+    let requests = await transport.requests
+    let url = try #require(requests.first?.url)
+    let urlComponents = try #require(URLComponents(url: url, resolvingAgainstBaseURL: false))
+    let threadPathPrefix = "/gmail/v1/users/me/threads/"
+    let encodedThreadID = String(urlComponents.percentEncodedPath.dropFirst(threadPathPrefix.count))
+    #expect(urlComponents.scheme == "https")
+    #expect(urlComponents.host == "gmail.googleapis.com")
+    #expect(urlComponents.percentEncodedPath.hasPrefix(threadPathPrefix))
+    #expect(!encodedThreadID.contains("/"))
+    #expect(encodedThreadID.removingPercentEncoding == threadID)
+    #expect(urlComponents.fragment == nil)
+    #expect(urlComponents.queryItems == [URLQueryItem(name: "format", value: "full")])
+    #expect(requests.count == 1)
+  }
+
+  @Test(arguments: ["", ".", ".."])
+  func rejectsInvalidThreadIDsBeforeRequestingCredentials(threadID: String) async throws {
+    let tokenProvider = TokenProvider()
+    let transport = Transport()
+    let client = GmailClient(tokenProvider: tokenProvider, transport: transport)
+
+    await #expect(throws: GmailClient.RequestError.invalidThreadID) {
+      try await client.thread(id: threadID)
+    }
+    #expect(await tokenProvider.retrievalCount == 0)
+    #expect(await tokenProvider.invalidatedTokens.isEmpty)
+    #expect(await transport.requests.isEmpty)
+  }
+
+  @Test
+  func preservesFullThreadRequestAcrossAuthenticationRetry() async throws {
+    let tokenProvider = TokenProvider(tokens: ["rejected-token", "replacement-token"])
+    let transport = Transport(statusCodes: [401, 200], responseBody: #"{"id":"thread-1","messages":[]}"#)
+    let client = GmailClient(tokenProvider: tokenProvider, transport: transport)
+
+    #expect(try await client.thread(id: "thread-1").id == "thread-1")
+
+    let requests = await transport.requests
+    #expect(requests.count == 2)
+    #expect(requests.first?.url?.absoluteString == "https://gmail.googleapis.com/gmail/v1/users/me/threads/thread-1?format=full")
+    #expect(requests.first?.url == requests.last?.url)
+    #expect(requests.map { $0.value(forHTTPHeaderField: "Authorization") } == [
+      "Bearer rejected-token", "Bearer replacement-token"
+    ])
+    #expect(await tokenProvider.retrievalCount == 2)
+    #expect(await tokenProvider.invalidatedTokens == ["rejected-token"])
+  }
+
+  @Test(arguments: [403, 404, 429, 500])
+  func preservesThreadFetchHTTPFailuresWithoutRetry(statusCode: Int) async throws {
+    let tokenProvider = TokenProvider()
+    let transport = Transport(statusCodes: [statusCode], responseBody: "{}")
+    let client = GmailClient(tokenProvider: tokenProvider, transport: transport)
+
+    await #expect(throws: GmailClient.RequestError.requestFailed(statusCode: statusCode)) {
+      try await client.thread(id: "thread-1")
+    }
+    #expect(await transport.requests.count == 1)
+    #expect(await tokenProvider.invalidatedTokens.isEmpty)
+  }
+
+  @Test(arguments: [
+    "not json", "{}", #"{"id":"thread-1"}"#,
+    #"{"id":"thread-1","messages":null}"#,
+    #"{"id":"thread-1","messages":[{"threadId":"thread-1"}]}"#
+  ])
+  func rejectsMalformedThreadsWithoutRetry(responseBody: String) async throws {
+    let transport = Transport(responseBody: responseBody)
+    let client = GmailClient(tokenProvider: TokenProvider(), transport: transport)
+
+    await #expect(throws: GmailClient.RequestError.invalidResponse) {
+      try await client.thread(id: "thread-1")
+    }
+    #expect(await transport.requests.count == 1)
+  }
+
+  @Test
   func finalRejectionRemainsAuthenticationErrorWhenInvalidationIsCancelled() async throws {
     let tokenProvider = TokenProvider(cancellationStage: .invalidation, cancellationInvalidationCount: 2)
     let transport = Transport(statusCodes: [401, 401, 200])
