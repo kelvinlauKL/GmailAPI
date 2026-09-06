@@ -11,7 +11,7 @@ public actor GoogleOAuthTokenProvider: GmailTokenProvider {
   private let clientID: String
   private let clientSecret: String?
   private let refreshToken: String
-  private let transport: GmailTransport
+  private let transport: any GmailTransport
   private var cachedToken: CachedToken?
   private var refreshTask: Task<String, Error>?
 
@@ -19,7 +19,7 @@ public actor GoogleOAuthTokenProvider: GmailTokenProvider {
     clientID: String,
     clientSecret: String? = nil,
     refreshToken: String,
-    transport: GmailTransport = GmailTransport()
+    transport: any GmailTransport = URLSessionGmailTransport()
   ) throws {
     guard !clientID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
       !refreshToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty

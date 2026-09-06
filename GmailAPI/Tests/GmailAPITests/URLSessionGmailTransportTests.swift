@@ -5,28 +5,22 @@ import GmailAPI
 import FoundationNetworking
 #endif
 
-struct GmailTransportTests {
+struct URLSessionGmailTransportTests {
   @Test
-  func forwardsRequestToCustomTransport() async throws {
+  func forwardsRequestThroughSessionAndReturnsResponse() async throws {
+    let session = makeStubSession()
+    defer { session.invalidateAndCancel() }
+    let transport: any GmailTransport = URLSessionGmailTransport(session: session)
     let url = try #require(URL(string: "https://gmail-transport.invalid/profile"))
     var request = URLRequest(url: url)
     request.httpMethod = "GET"
     request.setValue("Bearer test-token", forHTTPHeaderField: "Authorization")
-    let response = try #require(HTTPURLResponse(
-      url: url, statusCode: 200, httpVersion: nil, headerFields: nil
-    ))
-    let responseData = Data("profile".utf8)
-    let transport = GmailTransport { receivedRequest in
-      #expect(receivedRequest.url == url)
-      #expect(receivedRequest.httpMethod == "GET")
-      #expect(receivedRequest.value(forHTTPHeaderField: "Authorization") == "Bearer test-token")
-      return (responseData, response)
-    }
 
     let result = try await transport.send(request)
 
-    #expect(result.data == responseData)
+    #expect(result.data == Data("https://gmail-transport.invalid/profile\nGET\nBearer test-token".utf8))
     #expect(result.response.statusCode == 200)
+    #expect(result.response.url == url)
   }
 
   @Test
@@ -35,7 +29,7 @@ struct GmailTransportTests {
     defer { session.invalidateAndCancel() }
     let url = try #require(URL(string: "https://gmail-transport.invalid/unavailable"))
 
-    let result = try await GmailTransport(session: session).send(URLRequest(url: url))
+    let result = try await URLSessionGmailTransport(session: session).send(URLRequest(url: url))
 
     #expect(result.response.statusCode == 503)
     #expect(result.response.value(forHTTPHeaderField: "Retry-After") == "30")
@@ -47,12 +41,12 @@ struct GmailTransportTests {
     let session = makeStubSession()
     defer { session.invalidateAndCancel() }
     let url = try #require(URL(string: "https://gmail-transport.invalid/non-http"))
-    let transport = GmailTransport(session: session)
+    let transport = URLSessionGmailTransport(session: session)
 
-    await #expect(throws: GmailTransport.TransportError.nonHTTPResponse) {
+    await #expect(throws: URLSessionGmailTransport.TransportError.nonHTTPResponse) {
       try await transport.send(URLRequest(url: url))
     }
-    let error: any LocalizedError = GmailTransport.TransportError.nonHTTPResponse
+    let error: any LocalizedError = URLSessionGmailTransport.TransportError.nonHTTPResponse
     #expect(error.localizedDescription == "The server did not return an HTTP response.")
     #expect(error.failureReason != nil)
     #expect(error.recoverySuggestion != nil)
@@ -65,7 +59,7 @@ struct GmailTransportTests {
     let url = try #require(URL(string: "https://gmail-transport.invalid/network-error"))
 
     do {
-      _ = try await GmailTransport(session: session).send(URLRequest(url: url))
+      _ = try await URLSessionGmailTransport(session: session).send(URLRequest(url: url))
       Issue.record("Expected the network failure to propagate.")
     } catch let error as URLError {
       #expect(error.code == .notConnectedToInternet)
@@ -74,11 +68,10 @@ struct GmailTransportTests {
 
   @Test
   func rejectsAlreadyCancelledTaskBeforeSending() async throws {
+    let session = makeStubSession()
+    defer { session.invalidateAndCancel() }
     let url = try #require(URL(string: "https://gmail-transport.invalid/cancelled"))
-    let transport = GmailTransport { _ in
-      Issue.record("Cancelled work must not reach the transport.")
-      throw CancellationError()
-    }
+    let transport = URLSessionGmailTransport(session: session)
 
     let cancelledTask = Task {
       withUnsafeCurrentTask { currentTask in currentTask?.cancel() }
@@ -107,6 +100,25 @@ struct GmailTransportTests {
         return
       }
       switch url.path {
+      case "/cancelled":
+        Issue.record("An already-cancelled request must not reach URLSession execution.")
+        client?.urlProtocol(self, didFailWithError: URLError(.cancelled))
+        return
+      case "/profile":
+        guard let response = HTTPURLResponse(
+          url: url, statusCode: 200, httpVersion: nil, headerFields: nil
+        ) else {
+          client?.urlProtocol(self, didFailWithError: URLError(.badServerResponse))
+          return
+        }
+        // Echo the received request so the test can verify what URLSession sent.
+        let requestDetails = [
+          url.absoluteString,
+          request.httpMethod ?? "",
+          request.value(forHTTPHeaderField: "Authorization") ?? ""
+        ].joined(separator: "\n")
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocol(self, didLoad: Data(requestDetails.utf8))
       case "/unavailable":
         guard let response = HTTPURLResponse(
           url: url, statusCode: 503, httpVersion: nil, headerFields: ["Retry-After": "30"]

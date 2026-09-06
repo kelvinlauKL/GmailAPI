@@ -33,7 +33,7 @@ struct GoogleOAuthTokenProviderTests {
       clientID: specialValue,
       clientSecret: specialValue,
       refreshToken: specialValue,
-      transport: GmailTransport { try await endpoint.send($0) }
+      transport: endpoint
     )
 
     _ = try await provider.accessToken()
@@ -203,7 +203,7 @@ struct GoogleOAuthTokenProviderTests {
   private func makeProvider(endpoint: TokenEndpoint) throws -> GoogleOAuthTokenProvider {
     try GoogleOAuthTokenProvider(
       clientID: "test-client", refreshToken: "test-refresh-token",
-      transport: GmailTransport { try await endpoint.send($0) }
+      transport: endpoint
     )
   }
 
@@ -218,7 +218,7 @@ struct GoogleOAuthTokenProviderTests {
     return fields
   }
 
-  private actor TokenEndpoint {
+  private actor TokenEndpoint: GmailTransport {
     private(set) var requests: [URLRequest] = []
     private let tokenLifetime: Int
     private let firstResponseBody: String?
@@ -242,7 +242,7 @@ struct GoogleOAuthTokenProviderTests {
       self.paused = paused
     }
 
-    func send(_ request: URLRequest) async throws -> (Data, HTTPURLResponse) {
+    func send(_ request: URLRequest) async throws -> (data: Data, response: HTTPURLResponse) {
       requests.append(request)
       let requestNumber = requests.count
       for waiter in requestWaiters { waiter.resume() }
