@@ -28,7 +28,7 @@ public struct GmailClient: Sendable {
   /// Uses the same authentication retry and error handling as `profile()`.
   public func listThreads(_ request: GmailThreadListRequest) async throws -> GmailThreadListResponse {
     guard var urlComponents = URLComponents(
-      url: Constant.threadListEndpoint, resolvingAgainstBaseURL: false
+      url: Constant.threadsEndpoint, resolvingAgainstBaseURL: false
     ) else {
       throw RequestError.invalidRequestURL
     }
@@ -36,6 +36,27 @@ public struct GmailClient: Sendable {
     // Query decoders can interpret literal plus signs as spaces.
     urlComponents.percentEncodedQuery = urlComponents.percentEncodedQuery?
       .replacingOccurrences(of: "+", with: "%2B")
+    guard let url = urlComponents.url else { throw RequestError.invalidRequestURL }
+    return try await get(url)
+  }
+
+  /// Fetches a conversation with message bodies in Gmail's parsed MIME format.
+  /// Supply the original thread ID; it is encoded as one URL path segment.
+  /// Empty IDs and the path segments `.` and `..` are rejected before requesting credentials.
+  /// Uses the same authentication retry and error handling as `profile()`.
+  public func thread(id: String) async throws -> GmailThread {
+    guard !id.isEmpty, id != ".", id != ".." else {
+      throw RequestError.invalidThreadID
+    }
+    guard let encodedThreadID = id.addingPercentEncoding(
+      withAllowedCharacters: Constant.unreservedURLCharacters
+    ), var urlComponents = URLComponents(
+      url: Constant.threadsEndpoint, resolvingAgainstBaseURL: false
+    ) else {
+      throw RequestError.invalidRequestURL
+    }
+    urlComponents.percentEncodedPath += "/\(encodedThreadID)"
+    urlComponents.queryItems = [URLQueryItem(name: "format", value: "full")]
     guard let url = urlComponents.url else { throw RequestError.invalidRequestURL }
     return try await get(url)
   }
@@ -73,13 +94,17 @@ public struct GmailClient: Sendable {
 
   private enum Constant {
     static let profileEndpoint: URL = URL(string: "https://gmail.googleapis.com/gmail/v1/users/me/profile")!
-    static let threadListEndpoint: URL = URL(string: "https://gmail.googleapis.com/gmail/v1/users/me/threads")!
+    static let threadsEndpoint: URL = URL(string: "https://gmail.googleapis.com/gmail/v1/users/me/threads")!
+    static let unreservedURLCharacters: CharacterSet = CharacterSet(
+      charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~"
+    )
     static let successStatusCode: Int = 200
     static let unauthorizedStatusCode: Int = 401
   }
 
   public enum RequestError: LocalizedError, Equatable {
     case invalidRequestURL
+    case invalidThreadID
     case invalidAccessToken
     case reauthorizationRequired
     case requestFailed(statusCode: Int)
@@ -88,6 +113,7 @@ public struct GmailClient: Sendable {
     public var errorDescription: String? {
       switch self {
       case .invalidRequestURL: "The Gmail request URL could not be constructed."
+      case .invalidThreadID: "The Gmail thread ID is invalid."
       case .invalidAccessToken: "The credential provider returned an invalid access token."
       case .reauthorizationRequired: "Google sign-in is required."
       case .requestFailed(let statusCode): "The Gmail request failed with HTTP status \(statusCode)."
@@ -98,6 +124,7 @@ public struct GmailClient: Sendable {
     public var failureReason: String? {
       switch self {
       case .invalidRequestURL: "The request parameters could not be encoded into a valid URL."
+      case .invalidThreadID: "The thread ID was empty or was a dot path segment."
       case .invalidAccessToken: "The access token was empty or contained whitespace."
       case .reauthorizationRequired: "Gmail rejected the credentials after an authentication retry."
       case .requestFailed: "Gmail did not return the expected successful HTTP status."
@@ -108,6 +135,7 @@ public struct GmailClient: Sendable {
     public var recoverySuggestion: String? {
       switch self {
       case .invalidRequestURL: "Check the request parameters and URL construction before retrying."
+      case .invalidThreadID: "Provide the original thread ID returned by Gmail."
       case .invalidAccessToken: "Provide a current access token without whitespace or the Bearer prefix."
       case .reauthorizationRequired: "Sign in again and supply a provider with the new credentials."
       case .requestFailed: "Check the HTTP status, account permissions, quota, and service availability before retrying."
