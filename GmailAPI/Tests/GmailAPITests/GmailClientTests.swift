@@ -446,6 +446,133 @@ struct GmailClientTests {
     #expect(await transport.requests.count == 1)
   }
 
+  @Test(arguments: [
+    #"{"size":2,"data":"-_8=","futureField":true}"#,
+    #"{"size":2,"data":"-_8"}"#,
+    #"{"data":"-_8"}"#,
+    #"{"size":null,"data":"-_8"}"#
+  ])
+  func fetchesAndDecodesAuthenticatedAttachment(responseBody: String) async throws {
+    let tokenProvider = TokenProvider()
+    let transport = Transport(responseBody: responseBody)
+    let client = GmailClient(tokenProvider: tokenProvider, transport: transport)
+
+    let content = try await client.attachment(messageID: "message-1", attachmentID: "attachment-1")
+
+    #expect(content == Data([0xfb, 0xff]))
+    let requests = await transport.requests
+    let request = try #require(requests.first)
+    #expect(requests.count == 1)
+    #expect(request.url?.absoluteString == "https://gmail.googleapis.com/gmail/v1/users/me/messages/message-1/attachments/attachment-1")
+    #expect(request.httpMethod == "GET")
+    #expect(request.httpBody == nil)
+    #expect(request.value(forHTTPHeaderField: "Authorization") == "Bearer first-token")
+    #expect(request.value(forHTTPHeaderField: "Accept") == "application/json")
+    #expect(await tokenProvider.retrievalCount == 1)
+    #expect(await tokenProvider.invalidatedTokens.isEmpty)
+  }
+
+  @Test
+  func encodesMessageAndAttachmentIDsAsSeparatePathSegments() async throws {
+    let transport = Transport(responseBody: #"{"size":0,"data":""}"#)
+    let client = GmailClient(tokenProvider: TokenProvider(), transport: transport)
+    let messageID = "../message%2F?alt=media#雪"
+    let attachmentID = "attachment+/%2E%2E?userId=other#雪 space"
+
+    _ = try await client.attachment(messageID: messageID, attachmentID: attachmentID)
+
+    let requests = await transport.requests
+    let url = try #require(requests.first?.url)
+    let urlComponents = try #require(URLComponents(url: url, resolvingAgainstBaseURL: false))
+    let pathSegments = urlComponents.percentEncodedPath.split(separator: "/").map {
+      String($0).removingPercentEncoding
+    }
+    #expect(pathSegments == ["gmail", "v1", "users", "me", "messages", messageID, "attachments", attachmentID])
+    #expect(urlComponents.scheme == "https")
+    #expect(urlComponents.host == "gmail.googleapis.com")
+    #expect(urlComponents.query == nil)
+    #expect(urlComponents.fragment == nil)
+    #expect(requests.count == 1)
+  }
+
+  @Test(arguments: ["", ".", ".."])
+  func rejectsInvalidAttachmentRequestIDsBeforeRequestingCredentials(invalidID: String) async throws {
+    let tokenProvider = TokenProvider()
+    let transport = Transport()
+    let client = GmailClient(tokenProvider: tokenProvider, transport: transport)
+
+    await #expect(throws: GmailClient.RequestError.invalidMessageID) {
+      try await client.attachment(messageID: invalidID, attachmentID: "attachment-1")
+    }
+    await #expect(throws: GmailClient.RequestError.invalidAttachmentID) {
+      try await client.attachment(messageID: "message-1", attachmentID: invalidID)
+    }
+    #expect(await tokenProvider.retrievalCount == 0)
+    #expect(await tokenProvider.invalidatedTokens.isEmpty)
+    #expect(await transport.requests.isEmpty)
+  }
+
+  @Test(arguments: [#"{"size":0,"data":""}"#, #"{"data":""}"#])
+  func acceptsExplicitEmptyAttachmentContent(responseBody: String) async throws {
+    let transport = Transport(responseBody: responseBody)
+    let client = GmailClient(tokenProvider: TokenProvider(), transport: transport)
+
+    let content = try await client.attachment(messageID: "message-1", attachmentID: "attachment-1")
+
+    #expect(content.isEmpty)
+    #expect(await transport.requests.count == 1)
+  }
+
+  @Test
+  func preservesAttachmentRequestAcrossAuthenticationRetry() async throws {
+    let tokenProvider = TokenProvider(tokens: ["rejected-token", "replacement-token"])
+    let transport = Transport(statusCodes: [401, 200], responseBody: #"{"size":5,"data":"SGVsbG8"}"#)
+    let client = GmailClient(tokenProvider: tokenProvider, transport: transport)
+
+    let content = try await client.attachment(messageID: "message-1", attachmentID: "attachment-1")
+
+    #expect(content == Data("Hello".utf8))
+    let requests = await transport.requests
+    #expect(requests.count == 2)
+    #expect(requests.first?.url?.absoluteString == "https://gmail.googleapis.com/gmail/v1/users/me/messages/message-1/attachments/attachment-1")
+    #expect(requests.first?.url == requests.last?.url)
+    #expect(requests.map { $0.value(forHTTPHeaderField: "Authorization") } == [
+      "Bearer rejected-token", "Bearer replacement-token"
+    ])
+    #expect(await tokenProvider.retrievalCount == 2)
+    #expect(await tokenProvider.invalidatedTokens == ["rejected-token"])
+  }
+
+  @Test(arguments: [403, 404, 429, 503])
+  func preservesAttachmentHTTPFailuresWithoutRetry(statusCode: Int) async throws {
+    let tokenProvider = TokenProvider()
+    let transport = Transport(statusCodes: [statusCode], responseBody: "{}")
+    let client = GmailClient(tokenProvider: tokenProvider, transport: transport)
+
+    await #expect(throws: GmailClient.RequestError.requestFailed(statusCode: statusCode)) {
+      try await client.attachment(messageID: "message-1", attachmentID: "attachment-1")
+    }
+    #expect(await transport.requests.count == 1)
+    #expect(await tokenProvider.invalidatedTokens.isEmpty)
+  }
+
+  @Test(arguments: [
+    "not json", "{}", #"{"size":0}"#,
+    #"{"size":2,"data":null}"#, #"{"size":2,"data":123}"#,
+    #"{"size":2,"data":"===="}"#, #"{"size":2,"data":"A"}"#,
+    #"{"size":3,"data":"-_8"}"#, #"{"size":-1,"data":""}"#,
+    #"{"size":"2","data":"-_8"}"#, #"{"size":2,"data":""}"#
+  ])
+  func rejectsIncompleteOrMalformedAttachmentsWithoutRetry(responseBody: String) async throws {
+    let transport = Transport(responseBody: responseBody)
+    let client = GmailClient(tokenProvider: TokenProvider(), transport: transport)
+
+    await #expect(throws: GmailClient.RequestError.invalidResponse) {
+      try await client.attachment(messageID: "message-1", attachmentID: "attachment-1")
+    }
+    #expect(await transport.requests.count == 1)
+  }
+
   @Test
   func finalRejectionRemainsAuthenticationErrorWhenInvalidationIsCancelled() async throws {
     let tokenProvider = TokenProvider(cancellationStage: .invalidation, cancellationInvalidationCount: 2)

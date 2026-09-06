@@ -45,12 +45,8 @@ public struct GmailClient: Sendable {
   /// Empty IDs and the path segments `.` and `..` are rejected before requesting credentials.
   /// Uses the same authentication retry and error handling as `profile()`.
   public func thread(id: String) async throws -> GmailThread {
-    guard !id.isEmpty, id != ".", id != ".." else {
-      throw RequestError.invalidThreadID
-    }
-    guard let encodedThreadID = id.addingPercentEncoding(
-      withAllowedCharacters: Constant.unreservedURLCharacters
-    ), var urlComponents = URLComponents(
+    let encodedThreadID = try encodedPathSegment(id, invalidIDError: .invalidThreadID)
+    guard var urlComponents = URLComponents(
       url: Constant.threadsEndpoint, resolvingAgainstBaseURL: false
     ) else {
       throw RequestError.invalidRequestURL
@@ -59,6 +55,46 @@ public struct GmailClient: Sendable {
     urlComponents.queryItems = [URLQueryItem(name: "format", value: "full")]
     guard let url = urlComponents.url else { throw RequestError.invalidRequestURL }
     return try await get(url)
+  }
+
+  /// Fetches an attachment or separately stored MIME body as decoded bytes.
+  /// Supply the original message and attachment IDs; each is encoded as one URL path segment.
+  /// Empty IDs and the path segments `.` and `..` are rejected before requesting credentials.
+  /// Requires a data field and verifies its byte count against the response's size when supplied.
+  /// Missing or malformed content and size mismatches throw `RequestError.invalidResponse`.
+  /// Uses the same authentication retry and error handling as `profile()`.
+  public func attachment(messageID: String, attachmentID: String) async throws -> Data {
+    let encodedMessageID = try encodedPathSegment(messageID, invalidIDError: .invalidMessageID)
+    let encodedAttachmentID = try encodedPathSegment(attachmentID, invalidIDError: .invalidAttachmentID)
+    guard var urlComponents = URLComponents(
+      url: Constant.messagesEndpoint, resolvingAgainstBaseURL: false
+    ) else {
+      throw RequestError.invalidRequestURL
+    }
+    urlComponents.percentEncodedPath += "/\(encodedMessageID)/attachments/\(encodedAttachmentID)"
+    guard let url = urlComponents.url else { throw RequestError.invalidRequestURL }
+
+    let body: GmailMessagePartBody = try await get(url)
+    guard let decodedContent = try? body.decodedData() else {
+      throw RequestError.invalidResponse
+    }
+    if let expectedSize = body.size, expectedSize != decodedContent.count {
+      throw RequestError.invalidResponse
+    }
+    return decodedContent
+  }
+
+  private func encodedPathSegment(_ identifier: String, invalidIDError: RequestError) throws -> String {
+    // Empty and dot segments can change the endpoint instead of identifying a resource.
+    guard !identifier.isEmpty, identifier != ".", identifier != ".." else {
+      throw invalidIDError
+    }
+    guard let encodedIdentifier = identifier.addingPercentEncoding(
+      withAllowedCharacters: Constant.unreservedURLCharacters
+    ) else {
+      throw RequestError.invalidRequestURL
+    }
+    return encodedIdentifier
   }
 
   private func get<Response: Decodable>(
@@ -95,6 +131,7 @@ public struct GmailClient: Sendable {
   private enum Constant {
     static let profileEndpoint: URL = URL(string: "https://gmail.googleapis.com/gmail/v1/users/me/profile")!
     static let threadsEndpoint: URL = URL(string: "https://gmail.googleapis.com/gmail/v1/users/me/threads")!
+    static let messagesEndpoint: URL = URL(string: "https://gmail.googleapis.com/gmail/v1/users/me/messages")!
     static let unreservedURLCharacters: CharacterSet = CharacterSet(
       charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~"
     )
@@ -105,6 +142,8 @@ public struct GmailClient: Sendable {
   public enum RequestError: LocalizedError, Equatable {
     case invalidRequestURL
     case invalidThreadID
+    case invalidMessageID
+    case invalidAttachmentID
     case invalidAccessToken
     case reauthorizationRequired
     case requestFailed(statusCode: Int)
@@ -114,6 +153,8 @@ public struct GmailClient: Sendable {
       switch self {
       case .invalidRequestURL: "The Gmail request URL could not be constructed."
       case .invalidThreadID: "The Gmail thread ID is invalid."
+      case .invalidMessageID: "The Gmail message ID is invalid."
+      case .invalidAttachmentID: "The Gmail attachment ID is invalid."
       case .invalidAccessToken: "The credential provider returned an invalid access token."
       case .reauthorizationRequired: "Google sign-in is required."
       case .requestFailed(let statusCode): "The Gmail request failed with HTTP status \(statusCode)."
@@ -125,6 +166,8 @@ public struct GmailClient: Sendable {
       switch self {
       case .invalidRequestURL: "The request parameters could not be encoded into a valid URL."
       case .invalidThreadID: "The thread ID was empty or was a dot path segment."
+      case .invalidMessageID: "The message ID was empty or was a dot path segment."
+      case .invalidAttachmentID: "The attachment ID was empty or was a dot path segment."
       case .invalidAccessToken: "The access token was empty or contained whitespace."
       case .reauthorizationRequired: "Gmail rejected the credentials after an authentication retry."
       case .requestFailed: "Gmail did not return the expected successful HTTP status."
@@ -136,6 +179,8 @@ public struct GmailClient: Sendable {
       switch self {
       case .invalidRequestURL: "Check the request parameters and URL construction before retrying."
       case .invalidThreadID: "Provide the original thread ID returned by Gmail."
+      case .invalidMessageID: "Provide the original ID of the message containing the attachment."
+      case .invalidAttachmentID: "Provide the original attachmentId returned in the message part body."
       case .invalidAccessToken: "Provide a current access token without whitespace or the Bearer prefix."
       case .reauthorizationRequired: "Sign in again and supply a provider with the new credentials."
       case .requestFailed: "Check the HTTP status, account permissions, quota, and service availability before retrying."
