@@ -20,7 +20,9 @@ public struct GmailHistoryRecord: Decodable, Equatable, Sendable {
 
   /// Labels removed from messages, when included in this record.
   public let labelsRemoved: [LabelRemoved]?
+}
 
+extension GmailHistoryRecord {
   /// A message addition within this history record.
   public struct MessageAdded: Decodable, Equatable, Sendable {
     /// The message added to the mailbox.
