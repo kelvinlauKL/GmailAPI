@@ -869,6 +869,258 @@ struct GmailClientTests {
     #expect(await tokenProvider.invalidatedTokens.count == 2)
   }
 
+  @Test(arguments: [429, 500, 502, 503, 504])
+  func retriesHTTPFailuresWhenThePolicyAllowsIt(statusCode: Int) async throws {
+    let tokenProvider = TokenProvider(tokens: ["first-token", "second-token"])
+    let transport = Transport(statusCodes: [statusCode, 200])
+    let retryPolicy = RetryPolicy()
+    let client = GmailClient(tokenProvider: tokenProvider, transport: transport, retryPolicy: retryPolicy)
+
+    #expect(try await client.profile().emailAddress == "demo@example.com")
+
+    let requests = await transport.requests
+    #expect(requests.count == 2)
+    #expect(requests.first?.url == requests.last?.url)
+    #expect(requests.map { $0.value(forHTTPHeaderField: "Authorization") } == [
+      "Bearer first-token", "Bearer second-token"
+    ])
+    #expect(requests.allSatisfy { $0.httpMethod == "GET" && $0.value(forHTTPHeaderField: "Accept") == "application/json" })
+    #expect(await retryPolicy.failures == [GmailRequestFailure(statusCode: statusCode)])
+    #expect(await retryPolicy.retryCounts == [0])
+    #expect(await tokenProvider.invalidatedTokens.isEmpty)
+  }
+
+  @Test
+  func preservesTheFinalFailureWhenTheRetryBudgetIsExhausted() async throws {
+    let responseBody = #"{"error":{"code":503,"errors":[{"reason":"backendError"}]}}"#
+    let details = try JSONDecoder().decode(GmailErrorResponse.self, from: Data(responseBody.utf8)).error
+    let transport = Transport(
+      statusCodes: [429, 502, 503, 200], responseBody: responseBody,
+      responseHeaders: ["Retry-After": "12"]
+    )
+    let retryPolicy = RetryPolicy(maximumRetries: 2)
+    let client = GmailClient(tokenProvider: TokenProvider(), transport: transport, retryPolicy: retryPolicy)
+    let expectedFailure = GmailRequestFailure(statusCode: 503, details: details, retryAfter: "12")
+
+    await #expect(throws: GmailClient.RequestError.requestFailed(expectedFailure)) {
+      try await client.profile()
+    }
+
+    #expect(await transport.requests.count == 3)
+    #expect(await retryPolicy.retryCounts == [0, 1, 2])
+    #expect(await retryPolicy.failures.map(\.statusCode) == [429, 502, 503])
+    #expect(await retryPolicy.failures.last == expectedFailure)
+  }
+
+  @Test
+  func preservesHistoryOptionsAndRetryCountsAcrossAuthenticationRefresh() async throws {
+    let tokenProvider = TokenProvider(tokens: ["first", "rejected", "third", "fourth"])
+    let transport = Transport(statusCodes: [503, 401, 503, 200], responseBody: #"{"historyId":"100"}"#)
+    let retryPolicy = RetryPolicy(maximumRetries: 2)
+    let client = GmailClient(tokenProvider: tokenProvider, transport: transport, retryPolicy: retryPolicy)
+    let options = try GmailHistoryListRequest(
+      startHistoryId: "90", maxResults: 25, pageToken: "page+/=%2F", labelId: "INBOX", historyTypes: [.messageAdded]
+    )
+
+    #expect(try await client.listHistory(options).historyId == "100")
+
+    let requests = await transport.requests
+    let requestURL = try #require(requests.first?.url)
+    #expect(requests.count == 4)
+    #expect(requests.allSatisfy { $0.url == requestURL })
+    #expect(try decodedQueryItems(in: requestURL) == [
+      URLQueryItem(name: "startHistoryId", value: "90"),
+      URLQueryItem(name: "maxResults", value: "25"),
+      URLQueryItem(name: "pageToken", value: "page+/=%2F"),
+      URLQueryItem(name: "labelId", value: "INBOX"),
+      URLQueryItem(name: "historyTypes", value: "messageAdded")
+    ])
+    #expect(await retryPolicy.retryCounts == [0, 1])
+    #expect(await retryPolicy.failures == Array(repeating: GmailRequestFailure(statusCode: 503, context: .historyList), count: 2))
+    #expect(await tokenProvider.invalidatedTokens == ["rejected"])
+    #expect(await tokenProvider.retrievalCount == 4)
+  }
+
+  @Test(arguments: [true, false])
+  func transientRetriesDoNotResetTheAuthenticationRetryLimit(failsInTransport: Bool) async throws {
+    let tokenProvider = TokenProvider(tokens: ["first", "second", "third"])
+    let transport = Transport(
+      statusCodes: [401, 503, 401, 200], errorsByRequestNumber: failsInTransport ? [2: URLError(.timedOut)] : [:]
+    )
+    let retryPolicy = RetryPolicy(maximumRetries: 2)
+    let client = GmailClient(tokenProvider: tokenProvider, transport: transport, retryPolicy: retryPolicy)
+
+    await #expect(throws: GmailClient.RequestError.reauthorizationRequired) {
+      try await client.profile()
+    }
+
+    #expect(await transport.requests.count == 3)
+    #expect(await tokenProvider.invalidatedTokens == ["first", "third"])
+    #expect(await retryPolicy.retryCounts == [0])
+  }
+
+  @Test
+  func passesTheOriginalTransportErrorToThePolicy() async throws {
+    let transportError = URLError(.timedOut, userInfo: [NSLocalizedDescriptionKey: "test timeout"])
+    let transport = Transport(errorsByRequestNumber: [1: transportError])
+    let retryPolicy = RetryPolicy()
+    let client = GmailClient(tokenProvider: TokenProvider(), transport: transport, retryPolicy: retryPolicy)
+
+    #expect(try await client.profile().emailAddress == "demo@example.com")
+
+    let receivedError = try #require(await retryPolicy.transportErrors.first as? URLError)
+    #expect(receivedError.code == .timedOut)
+    #expect(receivedError.localizedDescription == "test timeout")
+    #expect(await transport.requests.count == 2)
+    #expect(await retryPolicy.retryCounts == [0])
+  }
+
+  @Test
+  func sharesOneBudgetBetweenTransportAndHTTPFailures() async throws {
+    let transport = Transport(statusCodes: [200, 503, 200], errorsByRequestNumber: [1: URLError(.timedOut)])
+    let retryPolicy = RetryPolicy()
+    let client = GmailClient(tokenProvider: TokenProvider(), transport: transport, retryPolicy: retryPolicy)
+
+    await #expect(throws: GmailClient.RequestError.requestFailed(GmailRequestFailure(statusCode: 503))) {
+      try await client.profile()
+    }
+
+    #expect(await transport.requests.count == 2)
+    #expect(await retryPolicy.retryCounts == [0, 1])
+  }
+
+  @Test
+  func preservesTheTransportErrorWhenThePolicyDeclines() async throws {
+    let transport = Transport(errorsByRequestNumber: [1: URLError(.serverCertificateUntrusted)])
+    let client = GmailClient(
+      tokenProvider: TokenProvider(), transport: transport, retryPolicy: ExponentialGmailRetryPolicy()
+    )
+
+    do {
+      _ = try await client.profile()
+      Issue.record("Expected the original transport error.")
+    } catch let error as URLError {
+      #expect(error.code == .serverCertificateUntrusted)
+    }
+    #expect(await transport.requests.count == 1)
+  }
+
+  @Test(arguments: [403, 404, 501])
+  func theExponentialPolicyDeclinesPermanentFailures(statusCode: Int) async throws {
+    let transport = Transport(statusCodes: [statusCode, 200])
+    let client = GmailClient(
+      tokenProvider: TokenProvider(), transport: transport, retryPolicy: ExponentialGmailRetryPolicy()
+    )
+
+    await #expect(throws: GmailClient.RequestError.requestFailed(GmailRequestFailure(statusCode: statusCode))) {
+      try await client.profile()
+    }
+    #expect(await transport.requests.count == 1)
+  }
+
+  @Test(arguments: [DependencyFailure.credentials, .invalidation])
+  func doesNotPassProviderErrorsToTheRetryPolicy(failure: DependencyFailure) async throws {
+    let tokenProvider = TokenProvider(failure: failure)
+    let transport = Transport(statusCodes: [401])
+    let retryPolicy = RetryPolicy()
+    let client = GmailClient(tokenProvider: tokenProvider, transport: transport, retryPolicy: retryPolicy)
+
+    await #expect(throws: failure) { try await client.profile() }
+
+    #expect(await retryPolicy.retryCounts.isEmpty)
+    #expect(await tokenProvider.retrievalCount == 1)
+  }
+
+  @Test
+  func doesNotRetryInvalidSuccessfulResponses() async throws {
+    let transport = Transport(responseBody: "{}")
+    let retryPolicy = RetryPolicy()
+    let client = GmailClient(tokenProvider: TokenProvider(), transport: transport, retryPolicy: retryPolicy)
+
+    await #expect(throws: GmailClient.RequestError.invalidResponse) { try await client.profile() }
+
+    #expect(await retryPolicy.retryCounts.isEmpty)
+    #expect(await transport.requests.count == 1)
+  }
+
+  @Test
+  func validatesCredentialsAgainAfterAWait() async throws {
+    let tokenProvider = TokenProvider(tokens: ["first-token", "invalid token"])
+    let transport = Transport(statusCodes: [503, 200])
+    let retryPolicy = RetryPolicy()
+    let client = GmailClient(tokenProvider: tokenProvider, transport: transport, retryPolicy: retryPolicy)
+
+    await #expect(throws: GmailClient.RequestError.invalidAccessToken) { try await client.profile() }
+
+    #expect(await retryPolicy.retryCounts == [0])
+    #expect(await tokenProvider.retrievalCount == 2)
+    #expect(await transport.requests.count == 1)
+  }
+
+  @Test(arguments: [true, false])
+  func propagatesTransportCancellationWithoutConsultingThePolicy(usesURLError: Bool) async throws {
+    let cancellation: any Error = usesURLError ? URLError(.cancelled) : CancellationError()
+    let transport = Transport(errorsByRequestNumber: [1: cancellation])
+    let retryPolicy = RetryPolicy()
+    let client = GmailClient(tokenProvider: TokenProvider(), transport: transport, retryPolicy: retryPolicy)
+
+    do {
+      _ = try await client.profile()
+      Issue.record("Expected transport cancellation.")
+    } catch {
+      #expect(usesURLError ? (error as? URLError)?.code == .cancelled : error is CancellationError)
+    }
+    #expect(await retryPolicy.retryCounts.isEmpty)
+    #expect(await transport.requests.count == 1)
+  }
+
+  @Test
+  func cancellationDuringTheRetryWaitPreventsAnotherCredentialRequest() async throws {
+    let tokenProvider = TokenProvider()
+    let transport = Transport(statusCodes: [503, 200])
+    let retryPolicy = RetryPolicy(cancelsTask: true)
+    let client = GmailClient(tokenProvider: tokenProvider, transport: transport, retryPolicy: retryPolicy)
+    let requestTask = Task { try await client.profile() }
+
+    await #expect(throws: CancellationError.self) { try await requestTask.value }
+
+    #expect(await retryPolicy.retryCounts == [0])
+    #expect(await tokenProvider.retrievalCount == 1)
+    #expect(await transport.requests.count == 1)
+  }
+
+  @Test(arguments: [true, false])
+  func propagatesRetryPolicyErrors(failsInTransport: Bool) async throws {
+    let transport = Transport(
+      statusCodes: [503], errorsByRequestNumber: failsInTransport ? [1: URLError(.timedOut)] : [:]
+    )
+    let retryPolicy = RetryPolicy(failure: DependencyFailure.transport)
+    let client = GmailClient(tokenProvider: TokenProvider(), transport: transport, retryPolicy: retryPolicy)
+
+    await #expect(throws: DependencyFailure.transport) { try await client.profile() }
+
+    #expect(await retryPolicy.retryCounts == [0])
+    #expect(await transport.requests.count == 1)
+  }
+
+  @Test
+  func concurrentOperationsHaveIndependentRetryBudgets() async throws {
+    let transport = RetryingTransport()
+    let retryPolicy = RetryPolicy()
+    let client = GmailClient(tokenProvider: TokenProvider(), transport: transport, retryPolicy: retryPolicy)
+    let options = try GmailThreadListRequest()
+
+    async let profile = client.profile()
+    async let threads = client.listThreads(options)
+    let responses = try await (profile, threads)
+
+    #expect(responses.0.emailAddress == "demo@example.com")
+    #expect(responses.1.threads == [])
+    #expect(await retryPolicy.retryCounts == [0, 0])
+    #expect(await transport.requestCounts.count == 2)
+    #expect(await transport.requestCounts.values.allSatisfy { $0 == 2 })
+  }
+
   private func decodedQueryItems(in url: URL) throws -> [URLQueryItem] {
     let urlComponents = try #require(URLComponents(url: url, resolvingAgainstBaseURL: false))
     let encodedQuery = try #require(urlComponents.percentEncodedQuery)
@@ -939,6 +1191,7 @@ private extension GmailClientTests {
     private let responseHeaders: [String: String]
     private let failure: DependencyFailure?
     private let cancellationStage: CancellationStage?
+    private let errorsByRequestNumber: [Int: any Error]
     private(set) var requests: [URLRequest] = []
 
     init(
@@ -948,13 +1201,15 @@ private extension GmailClientTests {
         """,
       responseHeaders: [String: String] = [:],
       failure: DependencyFailure? = nil,
-      cancellationStage: CancellationStage? = nil
+      cancellationStage: CancellationStage? = nil,
+      errorsByRequestNumber: [Int: any Error] = [:]
     ) {
       self.statusCodes = statusCodes
       self.responseBody = responseBody
       self.responseHeaders = responseHeaders
       self.failure = failure
       self.cancellationStage = cancellationStage
+      self.errorsByRequestNumber = errorsByRequestNumber
     }
 
     func setResponseBody(_ responseBody: String) {
@@ -963,6 +1218,7 @@ private extension GmailClientTests {
 
     func send(_ request: URLRequest) async throws -> (data: Data, response: HTTPURLResponse) {
       requests.append(request)
+      if let error = errorsByRequestNumber[requests.count] { throw error }
       if failure == .transport { throw DependencyFailure.transport }
       if cancellationStage == .response {
         withUnsafeCurrentTask { currentTask in currentTask?.cancel() }
@@ -973,6 +1229,49 @@ private extension GmailClientTests {
         url: url, statusCode: statusCode,
         httpVersion: nil, headerFields: responseHeaders
       ))
+      return (Data(responseBody.utf8), response)
+    }
+  }
+
+  actor RetryPolicy: GmailRetryPolicy {
+    private let maximumRetries: Int
+    private let cancelsTask: Bool
+    private let failure: (any Error)?
+    private(set) var retryCounts: [Int] = []
+    private(set) var failures: [GmailRequestFailure] = []
+    private(set) var transportErrors: [any Error] = []
+
+    init(maximumRetries: Int = 1, cancelsTask: Bool = false, failure: (any Error)? = nil) {
+      self.maximumRetries = maximumRetries
+      self.cancelsTask = cancelsTask
+      self.failure = failure
+    }
+
+    func waitBeforeRetry(after error: any Error, retryCount: Int) async throws -> Bool {
+      retryCounts.append(retryCount)
+      if let requestFailure = error as? GmailRequestFailure {
+        failures.append(requestFailure)
+      } else {
+        transportErrors.append(error)
+      }
+      if cancelsTask { withUnsafeCurrentTask { currentTask in currentTask?.cancel() } }
+      if let failure { throw failure }
+      return retryCount < maximumRetries
+    }
+  }
+
+  actor RetryingTransport: GmailTransport {
+    private(set) var requestCounts: [URL: Int] = [:]
+
+    func send(_ request: URLRequest) async throws -> (data: Data, response: HTTPURLResponse) {
+      let url = try #require(request.url)
+      requestCounts[url, default: 0] += 1
+      let response = try #require(HTTPURLResponse(
+        url: url, statusCode: requestCounts[url] == 1 ? 503 : 200, httpVersion: nil, headerFields: nil
+      ))
+      let responseBody = """
+        {"emailAddress":"demo@example.com","messagesTotal":0,"threadsTotal":0,"historyId":"100","threads":[]}
+        """
       return (Data(responseBody.utf8), response)
     }
   }
