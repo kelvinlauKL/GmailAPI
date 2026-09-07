@@ -38,6 +38,14 @@ public struct GmailClient: Sendable {
     return try await get(url)
   }
 
+  /// Creates a lazy sequence of thread-list pages, starting at the supplied page token.
+  /// Each iterator preserves the search and filters and uses this client's credentials,
+  /// transport, and retry policy. No request is sent until a page is requested.
+  /// Breaking out of iteration stops further fetching; an error finishes that iterator.
+  public func threadPages(_ request: GmailThreadListRequest) -> GmailThreadPageSequence {
+    GmailThreadPageSequence(client: self, request: request)
+  }
+
   /// Fetches one page of mailbox changes after the supplied starting history ID.
   /// Pass the returned `nextPageToken` with the same starting ID and filters to fetch another page.
   /// Uses the same authentication retry and error handling as `profile()`.
@@ -45,6 +53,16 @@ public struct GmailClient: Sendable {
   public func listHistory(_ request: GmailHistoryListRequest) async throws -> GmailHistoryListResponse {
     let url = try requestURL(for: Constant.historyEndpoint, queryItems: request.queryItems)
     return try await get(url, failureContext: .historyList)
+  }
+
+  /// Creates a lazy sequence of history pages, starting at the supplied page token.
+  /// The original `startHistoryId` and filters are preserved across every page.
+  /// Each iterator uses this client's credentials, transport, and retry policy.
+  /// Save the final page's `historyId` only after every page has been processed successfully.
+  /// Breaking out of iteration stops further fetching; an error finishes that iterator.
+  /// Expired history propagates as a `requestFailed` error with a `.historyExpired` category.
+  public func historyPages(_ request: GmailHistoryListRequest) -> GmailHistoryPageSequence {
+    GmailHistoryPageSequence(client: self, request: request)
   }
 
   /// Fetches a conversation with message bodies in Gmail's parsed MIME format.

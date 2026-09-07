@@ -1121,6 +1121,77 @@ struct GmailClientTests {
     #expect(await transport.requestCounts.values.allSatisfy { $0 == 2 })
   }
 
+  @Test
+  func threadPagesUseTheClientsDependenciesAndAFreshRetryBudgetForEachPage() async throws {
+    let tokenProvider = TokenProvider()
+    let transport = Transport(
+      statusCodes: [503, 200, 503, 200],
+      responseBody: #"{"threads":[{"id":"first"}],"nextPageToken":"second+/=%2F"}"#
+    )
+    let retryPolicy = RetryPolicy()
+    let client = GmailClient(tokenProvider: tokenProvider, transport: transport, retryPolicy: retryPolicy)
+    let options = try GmailThreadListRequest(q: "from:demo+tag@example.com", pageToken: "resume")
+    let pages: GmailThreadPageSequence = client.threadPages(options)
+
+    #expect(await transport.requests.isEmpty)
+    #expect(await tokenProvider.retrievalCount == 0)
+    var threadIDs: [String] = []
+    for try await page in pages {
+      threadIDs.append(contentsOf: page.threads?.map(\.id) ?? [])
+      await transport.setResponseBody(#"{"threads":[{"id":"second"}]}"#)
+    }
+
+    #expect(threadIDs == ["first", "second"])
+    #expect(await retryPolicy.retryCounts == [0, 0])
+    #expect(await tokenProvider.retrievalCount == 4)
+    let requests = await transport.requests
+    #expect(requests.count == 4)
+    for (request, pageToken) in zip(requests, ["resume", "resume", "second+/=%2F", "second+/=%2F"]) {
+      let url = try #require(request.url)
+      #expect(url.path == "/gmail/v1/users/me/threads")
+      let queryItems = try decodedQueryItems(in: url)
+      #expect(queryItems.contains(URLQueryItem(name: "q", value: "from:demo+tag@example.com")))
+      #expect(queryItems.contains(URLQueryItem(name: "pageToken", value: pageToken)))
+    }
+  }
+
+  @Test
+  func historyPagesPreserveTheCursorAcrossAuthenticationRetriesOnEachPage() async throws {
+    let tokenProvider = TokenProvider(tokens: ["rejected-first", "valid-first", "rejected-second", "valid-second"])
+    let transport = Transport(
+      statusCodes: [401, 200, 401, 200],
+      responseBody: #"{"historyId":"100","nextPageToken":"second+/=%2F"}"#
+    )
+    let client = GmailClient(tokenProvider: tokenProvider, transport: transport)
+    let options = try GmailHistoryListRequest(startHistoryId: "90", pageToken: "resume", labelId: "INBOX")
+    let pages: GmailHistoryPageSequence = client.historyPages(options)
+
+    #expect(await transport.requests.isEmpty)
+    #expect(await tokenProvider.retrievalCount == 0)
+    var historyIDs: [String] = []
+    for try await page in pages {
+      historyIDs.append(page.historyId)
+      await transport.setResponseBody(#"{"historyId":"200"}"#)
+    }
+
+    #expect(historyIDs == ["100", "200"])
+    #expect(await tokenProvider.retrievalCount == 4)
+    #expect(await tokenProvider.invalidatedTokens == ["rejected-first", "rejected-second"])
+    let requests = await transport.requests
+    #expect(requests.count == 4)
+    #expect(requests.map { $0.value(forHTTPHeaderField: "Authorization") } == [
+      "Bearer rejected-first", "Bearer valid-first", "Bearer rejected-second", "Bearer valid-second"
+    ])
+    for (request, pageToken) in zip(requests, ["resume", "resume", "second+/=%2F", "second+/=%2F"]) {
+      let url = try #require(request.url)
+      #expect(url.path == "/gmail/v1/users/me/history")
+      let queryItems = try decodedQueryItems(in: url)
+      #expect(queryItems.contains(URLQueryItem(name: "startHistoryId", value: "90")))
+      #expect(queryItems.contains(URLQueryItem(name: "pageToken", value: pageToken)))
+      #expect(queryItems.contains(URLQueryItem(name: "labelId", value: "INBOX")))
+    }
+  }
+
   private func decodedQueryItems(in url: URL) throws -> [URLQueryItem] {
     let urlComponents = try #require(URLComponents(url: url, resolvingAgainstBaseURL: false))
     let encodedQuery = try #require(urlComponents.percentEncodedQuery)
