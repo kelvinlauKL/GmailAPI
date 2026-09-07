@@ -327,6 +327,182 @@ struct GmailClientTests {
   }
 
   @Test
+  func listsOneAuthenticatedHistoryPageWithDefaultOptions() async throws {
+    let tokenProvider = TokenProvider()
+    let transport = Transport(responseBody: """
+      {
+        "history":[
+          {"id":"100","messagesAdded":[{"message":{"id":"message-1","threadId":"thread-1"}}]},
+          {"id":"104","labelsRemoved":[{
+            "message":{"id":"message-2","threadId":"thread-2"},"labelIds":["UNREAD"]
+          }]}
+        ],
+        "nextPageToken":"next-page",
+        "historyId":"18446744073709551615"
+      }
+      """)
+    let client = GmailClient(tokenProvider: tokenProvider, transport: transport)
+    let options = try GmailHistoryListRequest(startHistoryId: "90")
+
+    let page = try await client.listHistory(options)
+
+    #expect(page.history?.map(\.id) == ["100", "104"])
+    #expect(page.history?.first?.messagesAdded?.first?.message.id == "message-1")
+    #expect(page.history?.last?.labelsRemoved?.first?.labelIds == ["UNREAD"])
+    #expect(page.nextPageToken == "next-page")
+    #expect(page.historyId == "18446744073709551615")
+    let requests = await transport.requests
+    let request = try #require(requests.first)
+    let url = try #require(request.url)
+    #expect(requests.count == 1)
+    #expect(url.scheme == "https")
+    #expect(url.host == "gmail.googleapis.com")
+    #expect(url.path == "/gmail/v1/users/me/history")
+    #expect(request.httpMethod == "GET")
+    #expect(request.httpBody == nil)
+    #expect(request.value(forHTTPHeaderField: "Authorization") == "Bearer first-token")
+    #expect(request.value(forHTTPHeaderField: "Accept") == "application/json")
+    #expect(try decodedQueryItems(in: url) == [
+      URLQueryItem(name: "startHistoryId", value: "90"),
+      URLQueryItem(name: "maxResults", value: "100")
+    ])
+    #expect(await tokenProvider.retrievalCount == 1)
+    #expect(await tokenProvider.invalidatedTokens.isEmpty)
+  }
+
+  @Test
+  func preservesHistoryFiltersAndPageTokenAcrossAuthenticationRetry() async throws {
+    let tokenProvider = TokenProvider(tokens: ["rejected-token", "replacement-token"])
+    let transport = Transport(statusCodes: [401, 200], responseBody: #"{"historyId":"200"}"#)
+    let client = GmailClient(tokenProvider: tokenProvider, transport: transport)
+    let startHistoryId = "123+/=%2F&next=2#雪"
+    let pageToken = "page+/=%2F&next=2#雪"
+    let labelId = "Label_+/%2F&?= 雪"
+    let options = try GmailHistoryListRequest(
+      startHistoryId: startHistoryId, maxResults: 250, pageToken: pageToken,
+      labelId: labelId, historyTypes: [.labelRemoved, .messageAdded, .messageDeleted, .labelAdded]
+    )
+
+    let page = try await client.listHistory(options)
+
+    #expect(page.historyId == "200")
+    let requests = await transport.requests
+    let url = try #require(requests.first?.url)
+    let urlComponents = try #require(URLComponents(url: url, resolvingAgainstBaseURL: false))
+    let encodedQuery = try #require(urlComponents.percentEncodedQuery)
+    #expect(url.path == "/gmail/v1/users/me/history")
+    #expect(url.fragment == nil)
+    #expect(!encodedQuery.contains("+"))
+    #expect(encodedQuery.contains("%2B"))
+    #expect(try decodedQueryItems(in: url) == [
+      URLQueryItem(name: "startHistoryId", value: startHistoryId),
+      URLQueryItem(name: "maxResults", value: "250"),
+      URLQueryItem(name: "pageToken", value: pageToken),
+      URLQueryItem(name: "labelId", value: labelId),
+      URLQueryItem(name: "historyTypes", value: "labelRemoved"),
+      URLQueryItem(name: "historyTypes", value: "messageAdded"),
+      URLQueryItem(name: "historyTypes", value: "messageDeleted"),
+      URLQueryItem(name: "historyTypes", value: "labelAdded")
+    ])
+    #expect(requests.count == 2)
+    #expect(requests.first?.url == requests.last?.url)
+    #expect(requests.map { $0.value(forHTTPHeaderField: "Authorization") } == [
+      "Bearer rejected-token", "Bearer replacement-token"
+    ])
+    #expect(await tokenProvider.retrievalCount == 2)
+    #expect(await tokenProvider.invalidatedTokens == ["rejected-token"])
+  }
+
+  @Test
+  func fetchesNextHistoryPageOnlyWhenRequested() async throws {
+    let tokenProvider = TokenProvider()
+    let transport = Transport(responseBody: #"{"historyId":"200","nextPageToken":"next+/=%2F"}"#)
+    let client = GmailClient(tokenProvider: tokenProvider, transport: transport)
+    let firstOptions = try GmailHistoryListRequest(
+      startHistoryId: "90", maxResults: 250, labelId: "INBOX", historyTypes: [.messageAdded]
+    )
+
+    let firstPage = try await client.listHistory(firstOptions)
+
+    #expect(firstPage.history == nil)
+    #expect(firstPage.historyId == "200")
+    #expect(await transport.requests.count == 1)
+    let nextPageToken = try #require(firstPage.nextPageToken)
+    await transport.setResponseBody(#"{"history":[{"id":"100"}],"historyId":"200"}"#)
+    let nextOptions = try GmailHistoryListRequest(
+      startHistoryId: "90", maxResults: 250, pageToken: nextPageToken,
+      labelId: "INBOX", historyTypes: [.messageAdded]
+    )
+    let secondPage = try await client.listHistory(nextOptions)
+
+    #expect(secondPage.history?.map(\.id) == ["100"])
+    #expect(secondPage.historyId == "200")
+    #expect(secondPage.nextPageToken == nil)
+    let requests = await transport.requests
+    let nextURL = try #require(requests.last?.url)
+    #expect(try decodedQueryItems(in: nextURL) == [
+      URLQueryItem(name: "startHistoryId", value: "90"),
+      URLQueryItem(name: "maxResults", value: "250"),
+      URLQueryItem(name: "pageToken", value: "next+/=%2F"),
+      URLQueryItem(name: "labelId", value: "INBOX"),
+      URLQueryItem(name: "historyTypes", value: "messageAdded")
+    ])
+    #expect(requests.count == 2)
+  }
+
+  @Test(arguments: [
+    #"{"historyId":"200"}"#,
+    #"{"history":[],"historyId":"200"}"#,
+    #"{"history":null,"nextPageToken":null,"historyId":"200"}"#
+  ])
+  func acceptsEmptyHistoryPages(responseBody: String) async throws {
+    let transport = Transport(responseBody: responseBody)
+    let client = GmailClient(tokenProvider: TokenProvider(), transport: transport)
+    let options = try GmailHistoryListRequest(startHistoryId: "90")
+
+    let page = try await client.listHistory(options)
+
+    #expect(page.history?.isEmpty ?? true)
+    #expect(page.historyId == "200")
+    #expect(page.nextPageToken == nil)
+    #expect(await transport.requests.count == 1)
+  }
+
+  @Test(arguments: [
+    "not json", "{}", #"{"historyId":null}"#, #"{"historyId":200}"#,
+    #"{"history":{},"historyId":"200"}"#,
+    #"{"history":[{}],"historyId":"200"}"#,
+    #"{"nextPageToken":123,"historyId":"200"}"#
+  ])
+  func rejectsMalformedHistoryPagesWithoutRetry(responseBody: String) async throws {
+    let tokenProvider = TokenProvider()
+    let transport = Transport(responseBody: responseBody)
+    let client = GmailClient(tokenProvider: tokenProvider, transport: transport)
+    let options = try GmailHistoryListRequest(startHistoryId: "90")
+
+    await #expect(throws: GmailClient.RequestError.invalidResponse) {
+      try await client.listHistory(options)
+    }
+    #expect(await transport.requests.count == 1)
+    #expect(await tokenProvider.invalidatedTokens.isEmpty)
+  }
+
+  @Test(arguments: [403, 404, 429, 503])
+  func preservesHistoryListingHTTPFailuresWithoutRetry(statusCode: Int) async throws {
+    let tokenProvider = TokenProvider()
+    let transport = Transport(statusCodes: [statusCode], responseBody: "unreadable error response")
+    let client = GmailClient(tokenProvider: tokenProvider, transport: transport)
+    let options = try GmailHistoryListRequest(startHistoryId: "90")
+
+    await #expect(throws: GmailClient.RequestError.requestFailed(statusCode: statusCode)) {
+      try await client.listHistory(options)
+    }
+    #expect(await transport.requests.count == 1)
+    #expect(await tokenProvider.retrievalCount == 1)
+    #expect(await tokenProvider.invalidatedTokens.isEmpty)
+  }
+
+  @Test
   func fetchesAndDecodesAuthenticatedFullThread() async throws {
     let tokenProvider = TokenProvider()
     let transport = Transport(responseBody: """
