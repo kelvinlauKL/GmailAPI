@@ -27,16 +27,17 @@ public struct GmailClient: Sendable {
   /// Pass the returned `nextPageToken` in a subsequent request to fetch another page.
   /// Uses the same authentication retry and error handling as `profile()`.
   public func listThreads(_ request: GmailThreadListRequest) async throws -> GmailThreadListResponse {
-    guard var urlComponents = URLComponents(
-      url: Constant.threadsEndpoint, resolvingAgainstBaseURL: false
-    ) else {
-      throw RequestError.invalidRequestURL
-    }
-    urlComponents.queryItems = request.queryItems
-    // Query decoders can interpret literal plus signs as spaces.
-    urlComponents.percentEncodedQuery = urlComponents.percentEncodedQuery?
-      .replacingOccurrences(of: "+", with: "%2B")
-    guard let url = urlComponents.url else { throw RequestError.invalidRequestURL }
+    let url = try requestURL(for: Constant.threadsEndpoint, queryItems: request.queryItems)
+    return try await get(url)
+  }
+
+  /// Fetches one page of mailbox changes after the supplied starting history ID.
+  /// Pass the returned `nextPageToken` with the same starting ID and filters to fetch another page.
+  /// Uses the same authentication retry and error handling as `profile()`.
+  /// An invalid or expired starting history ID can produce `RequestError.requestFailed(statusCode: 404)`.
+  /// The caller should perform a full sync when Gmail returns that status.
+  public func listHistory(_ request: GmailHistoryListRequest) async throws -> GmailHistoryListResponse {
+    let url = try requestURL(for: Constant.historyEndpoint, queryItems: request.queryItems)
     return try await get(url)
   }
 
@@ -82,6 +83,18 @@ public struct GmailClient: Sendable {
       throw RequestError.invalidResponse
     }
     return decodedContent
+  }
+
+  private func requestURL(for endpoint: URL, queryItems: [URLQueryItem]) throws -> URL {
+    guard var urlComponents = URLComponents(url: endpoint, resolvingAgainstBaseURL: false) else {
+      throw RequestError.invalidRequestURL
+    }
+    urlComponents.queryItems = queryItems
+    // Query decoders can interpret literal plus signs as spaces.
+    urlComponents.percentEncodedQuery = urlComponents.percentEncodedQuery?
+      .replacingOccurrences(of: "+", with: "%2B")
+    guard let url = urlComponents.url else { throw RequestError.invalidRequestURL }
+    return url
   }
 
   private func encodedPathSegment(_ identifier: String, invalidIDError: RequestError) throws -> String {
@@ -133,6 +146,7 @@ private extension GmailClient {
   enum Constant {
     static let profileEndpoint: URL = URL(string: "https://gmail.googleapis.com/gmail/v1/users/me/profile")!
     static let threadsEndpoint: URL = URL(string: "https://gmail.googleapis.com/gmail/v1/users/me/threads")!
+    static let historyEndpoint: URL = URL(string: "https://gmail.googleapis.com/gmail/v1/users/me/history")!
     static let messagesEndpoint: URL = URL(string: "https://gmail.googleapis.com/gmail/v1/users/me/messages")!
     static let unreservedURLCharacters: CharacterSet = CharacterSet(
       charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~"
