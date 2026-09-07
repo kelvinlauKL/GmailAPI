@@ -50,7 +50,9 @@ public struct GmailThreadListRequest: Equatable, Sendable {
     items.append(contentsOf: labelIds.map { URLQueryItem(name: "labelIds", value: $0) })
     return items
   }
+}
 
+extension GmailThreadListRequest {
   public enum Constant {
     public static let minimumPageSize: Int = 1
     public static let maximumPageSize: Int = 500

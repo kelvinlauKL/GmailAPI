@@ -17,7 +17,9 @@ public struct GmailMessagePart: Decodable, Equatable, Sendable {
 
   /// Nested MIME parts in their received order, when included.
   public let parts: [GmailMessagePart]?
+}
 
+extension GmailMessagePart {
   /// A name/value entry in this MIME part's header list.
   public struct Header: Decodable, Equatable, Sendable {
     /// The header name exactly as returned by Gmail.

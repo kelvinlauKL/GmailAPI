@@ -127,7 +127,9 @@ public struct GmailClient: Sendable {
     }
     return decodedResponse
   }
+}
 
+extension GmailClient {
   private enum Constant {
     static let profileEndpoint: URL = URL(string: "https://gmail.googleapis.com/gmail/v1/users/me/profile")!
     static let threadsEndpoint: URL = URL(string: "https://gmail.googleapis.com/gmail/v1/users/me/threads")!

@@ -49,7 +49,9 @@ public struct GmailMessagePartBody: Decodable, Equatable, Sendable {
     }
     return decodedContent
   }
+}
 
+extension GmailMessagePartBody {
   private enum Constant {
     static let base64URLAlphabet: CharacterSet = CharacterSet(
       charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"

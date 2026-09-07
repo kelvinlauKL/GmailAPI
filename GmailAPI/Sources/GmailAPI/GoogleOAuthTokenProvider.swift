@@ -103,7 +103,9 @@ public actor GoogleOAuthTokenProvider: GmailTokenProvider {
     cachedToken = CachedToken(value: token.access_token, expiresAt: expiresAt)
     return token.access_token
   }
+}
 
+extension GoogleOAuthTokenProvider {
   private struct CachedToken {
     let value: String
     let expiresAt: Date

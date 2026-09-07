@@ -21,7 +21,9 @@ public struct URLSessionGmailTransport: GmailTransport {
     }
     return (data, httpResponse)
   }
+}
 
+extension URLSessionGmailTransport {
   public enum TransportError: LocalizedError, Equatable {
     case nonHTTPResponse
 

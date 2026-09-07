@@ -595,7 +595,9 @@ struct GmailClientTests {
     decodedComponents.percentEncodedQuery = encodedQuery.replacingOccurrences(of: "+", with: "%20")
     return try #require(decodedComponents.queryItems)
   }
+}
 
+extension GmailClientTests {
   enum CancellationStage: CaseIterable, Sendable {
     case beforeCredentials, credentials, response, invalidation
   }
