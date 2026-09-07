@@ -7,19 +7,25 @@ import FoundationNetworking
 public struct GmailClient: Sendable {
   private let tokenProvider: any GmailTokenProvider
   private let transport: any GmailTransport
+  private let retryPolicy: (any GmailRetryPolicy)?
 
+  /// Supply `ExponentialGmailRetryPolicy()` to enable bounded retries for temporary failures.
+  /// With the default `nil` policy, only the single authentication retry is performed.
   public init(
     tokenProvider: any GmailTokenProvider,
-    transport: any GmailTransport = URLSessionGmailTransport()
+    transport: any GmailTransport = URLSessionGmailTransport(),
+    retryPolicy: (any GmailRetryPolicy)? = nil
   ) {
     self.tokenProvider = tokenProvider
     self.transport = transport
+    self.retryPolicy = retryPolicy
   }
 
   /// Fetches the authenticated account's mailbox profile.
   /// A rejected access token is invalidated, with one retry using newly requested credentials.
   /// Other HTTP failures return `RequestError.requestFailed` with a `GmailRequestFailure`.
-  /// Provider and transport errors propagate. Temporary failures are returned without retrying.
+  /// A supplied retry policy handles other HTTP failures and transport errors.
+  /// Provider errors, cancellation, and unreadable successful responses propagate without retrying.
   public func profile() async throws -> GmailProfile {
     try await get(Constant.profileEndpoint)
   }
@@ -112,41 +118,60 @@ public struct GmailClient: Sendable {
 
   private func get<Response: Decodable>(
     _ url: URL,
-    failureContext: GmailRequestFailure.Context = .general,
-    canRetryAuthentication: Bool = true
+    failureContext: GmailRequestFailure.Context = .general
   ) async throws -> Response {
-    try Task.checkCancellation()
-    let accessToken = try await tokenProvider.accessToken()
-    try Task.checkCancellation()
-    guard !accessToken.isEmpty,
-      accessToken.rangeOfCharacter(from: .whitespacesAndNewlines) == nil
-    else {
-      throw RequestError.invalidAccessToken
+    var retryCount = 0
+    var hasRetriedAuthentication = false
+    while true {
+      try Task.checkCancellation()
+      let accessToken = try await tokenProvider.accessToken()
+      try Task.checkCancellation()
+      guard !accessToken.isEmpty,
+        accessToken.rangeOfCharacter(from: .whitespacesAndNewlines) == nil
+      else {
+        throw RequestError.invalidAccessToken
+      }
+      var request = URLRequest(url: url)
+      request.httpMethod = "GET"
+      request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
+      request.setValue("application/json", forHTTPHeaderField: "Accept")
+      let data: Data
+      let response: HTTPURLResponse
+      do {
+        (data, response) = try await transport.send(request)
+      } catch {
+        try Task.checkCancellation()
+        guard !(error is CancellationError), (error as? URLError)?.code != .cancelled,
+          let retryPolicy, try await retryPolicy.waitBeforeRetry(after: error, retryCount: retryCount)
+        else { throw error }
+        retryCount += 1
+        continue
+      }
+      try Task.checkCancellation()
+      if response.statusCode == Constant.unauthorizedStatusCode {
+        try await tokenProvider.invalidate(rejectedAccessToken: accessToken)
+        guard !hasRetriedAuthentication else { throw RequestError.reauthorizationRequired }
+        hasRetriedAuthentication = true
+        continue
+      }
+      if response.statusCode != Constant.successStatusCode {
+        let errorResponse = try? JSONDecoder().decode(GmailErrorResponse.self, from: data)
+        let failure = GmailRequestFailure(
+          statusCode: response.statusCode,
+          details: errorResponse?.error,
+          retryAfter: response.value(forHTTPHeaderField: "Retry-After"),
+          context: failureContext
+        )
+        guard let retryPolicy, try await retryPolicy.waitBeforeRetry(after: failure, retryCount: retryCount)
+        else { throw RequestError.requestFailed(failure) }
+        retryCount += 1
+        continue
+      }
+      guard let decodedResponse = try? JSONDecoder().decode(Response.self, from: data) else {
+        throw RequestError.invalidResponse
+      }
+      return decodedResponse
     }
-    var request = URLRequest(url: url)
-    request.httpMethod = "GET"
-    request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
-    request.setValue("application/json", forHTTPHeaderField: "Accept")
-    let (data, response) = try await transport.send(request)
-    try Task.checkCancellation()
-    if response.statusCode == Constant.unauthorizedStatusCode {
-      try await tokenProvider.invalidate(rejectedAccessToken: accessToken)
-      guard canRetryAuthentication else { throw RequestError.reauthorizationRequired }
-      return try await get(url, failureContext: failureContext, canRetryAuthentication: false)
-    }
-    guard response.statusCode == Constant.successStatusCode else {
-      let errorResponse = try? JSONDecoder().decode(GmailErrorResponse.self, from: data)
-      throw RequestError.requestFailed(GmailRequestFailure(
-        statusCode: response.statusCode,
-        details: errorResponse?.error,
-        retryAfter: response.value(forHTTPHeaderField: "Retry-After"),
-        context: failureContext
-      ))
-    }
-    guard let decodedResponse = try? JSONDecoder().decode(Response.self, from: data) else {
-      throw RequestError.invalidResponse
-    }
-    return decodedResponse
   }
 }
 
