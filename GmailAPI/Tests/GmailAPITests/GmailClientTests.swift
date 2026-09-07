@@ -941,10 +941,12 @@ struct GmailClientTests {
     #expect(await tokenProvider.retrievalCount == 4)
   }
 
-  @Test
-  func transientRetriesDoNotResetTheAuthenticationRetryLimit() async throws {
+  @Test(arguments: [true, false])
+  func transientRetriesDoNotResetTheAuthenticationRetryLimit(failsInTransport: Bool) async throws {
     let tokenProvider = TokenProvider(tokens: ["first", "second", "third"])
-    let transport = Transport(statusCodes: [401, 503, 401, 200])
+    let transport = Transport(
+      statusCodes: [401, 503, 401, 200], errorsByRequestNumber: failsInTransport ? [2: URLError(.timedOut)] : [:]
+    )
     let retryPolicy = RetryPolicy(maximumRetries: 2)
     let client = GmailClient(tokenProvider: tokenProvider, transport: transport, retryPolicy: retryPolicy)
 
