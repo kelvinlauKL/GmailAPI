@@ -103,30 +103,34 @@ public actor GoogleOAuthTokenProvider: GmailTokenProvider {
     cachedToken = CachedToken(value: token.access_token, expiresAt: expiresAt)
     return token.access_token
   }
+}
 
-  private struct CachedToken {
+private extension GoogleOAuthTokenProvider {
+  struct CachedToken {
     let value: String
     let expiresAt: Date
   }
 
-  private struct TokenResponse: Decodable {
+  struct TokenResponse: Decodable {
     let access_token: String
     let expires_in: Int
     let token_type: String
   }
 
-  private struct RefreshFailure: Decodable {
+  struct RefreshFailure: Decodable {
     let error: String
   }
 
-  private enum Constant {
+  enum Constant {
     static let tokenEndpoint: URL = URL(string: "https://oauth2.googleapis.com/token")!
     static let successStatusCode: Int = 200
     static let minimumTokenLifetime: Int = 1
     static let refreshLeeway: TimeInterval = 30
   }
+}
 
-  public enum ProviderError: LocalizedError, Equatable {
+public extension GoogleOAuthTokenProvider {
+  enum ProviderError: LocalizedError, Equatable {
     case missingCredentials
     case reauthorizationRequired
     case requestFailed(statusCode: Int)

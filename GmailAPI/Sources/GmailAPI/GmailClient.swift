@@ -127,8 +127,10 @@ public struct GmailClient: Sendable {
     }
     return decodedResponse
   }
+}
 
-  private enum Constant {
+private extension GmailClient {
+  enum Constant {
     static let profileEndpoint: URL = URL(string: "https://gmail.googleapis.com/gmail/v1/users/me/profile")!
     static let threadsEndpoint: URL = URL(string: "https://gmail.googleapis.com/gmail/v1/users/me/threads")!
     static let messagesEndpoint: URL = URL(string: "https://gmail.googleapis.com/gmail/v1/users/me/messages")!
@@ -138,8 +140,10 @@ public struct GmailClient: Sendable {
     static let successStatusCode: Int = 200
     static let unauthorizedStatusCode: Int = 401
   }
+}
 
-  public enum RequestError: LocalizedError, Equatable {
+public extension GmailClient {
+  enum RequestError: LocalizedError, Equatable {
     case invalidRequestURL
     case invalidThreadID
     case invalidMessageID

@@ -595,7 +595,9 @@ struct GmailClientTests {
     decodedComponents.percentEncodedQuery = encodedQuery.replacingOccurrences(of: "+", with: "%20")
     return try #require(decodedComponents.queryItems)
   }
+}
 
+extension GmailClientTests {
   enum CancellationStage: CaseIterable, Sendable {
     case beforeCredentials, credentials, response, invalidation
   }
@@ -607,8 +609,10 @@ struct GmailClientTests {
     var failureReason: String? { "The dependency was configured to fail." }
     var recoverySuggestion: String? { "Supply a working test dependency." }
   }
+}
 
-  private actor TokenProvider: GmailTokenProvider {
+private extension GmailClientTests {
+  actor TokenProvider: GmailTokenProvider {
     private let tokens: [String]
     private let failure: DependencyFailure?
     private let cancellationStage: CancellationStage?
@@ -647,7 +651,7 @@ struct GmailClientTests {
     }
   }
 
-  private actor Transport: GmailTransport {
+  actor Transport: GmailTransport {
     private let statusCodes: [Int]
     private var responseBody: String
     private let failure: DependencyFailure?

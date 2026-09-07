@@ -88,8 +88,10 @@ struct URLSessionGmailTransportTests {
     configuration.protocolClasses = [StubURLProtocol.self]
     return URLSession(configuration: configuration)
   }
+}
 
-  private final class StubURLProtocol: URLProtocol, @unchecked Sendable {
+private extension URLSessionGmailTransportTests {
+  final class StubURLProtocol: URLProtocol, @unchecked Sendable {
     override class func canInit(with request: URLRequest) -> Bool { true }
 
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }

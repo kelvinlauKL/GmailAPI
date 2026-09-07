@@ -217,8 +217,10 @@ struct GoogleOAuthTokenProviderTests {
     for queryItem in queryItems { fields[queryItem.name] = queryItem.value }
     return fields
   }
+}
 
-  private actor TokenEndpoint: GmailTransport {
+private extension GoogleOAuthTokenProviderTests {
+  actor TokenEndpoint: GmailTransport {
     private(set) var requests: [URLRequest] = []
     private let tokenLifetime: Int
     private let firstResponseBody: String?

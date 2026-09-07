@@ -50,14 +50,16 @@ public struct GmailThreadListRequest: Equatable, Sendable {
     items.append(contentsOf: labelIds.map { URLQueryItem(name: "labelIds", value: $0) })
     return items
   }
+}
 
-  public enum Constant {
+public extension GmailThreadListRequest {
+  enum Constant {
     public static let minimumPageSize: Int = 1
     public static let maximumPageSize: Int = 500
     public static let defaultPageSize: Int = 100
   }
 
-  public enum ValidationError: LocalizedError, Equatable {
+  enum ValidationError: LocalizedError, Equatable {
     case invalidMaxResults(Int)
 
     public var errorDescription: String? {
