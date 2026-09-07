@@ -129,8 +129,8 @@ private extension GoogleOAuthTokenProvider {
   }
 }
 
-extension GoogleOAuthTokenProvider {
-  public enum ProviderError: LocalizedError, Equatable {
+public extension GoogleOAuthTokenProvider {
+  enum ProviderError: LocalizedError, Equatable {
     case missingCredentials
     case reauthorizationRequired
     case requestFailed(statusCode: Int)

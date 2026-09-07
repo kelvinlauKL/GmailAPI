@@ -142,8 +142,8 @@ private extension GmailClient {
   }
 }
 
-extension GmailClient {
-  public enum RequestError: LocalizedError, Equatable {
+public extension GmailClient {
+  enum RequestError: LocalizedError, Equatable {
     case invalidRequestURL
     case invalidThreadID
     case invalidMessageID

@@ -22,21 +22,21 @@ public struct GmailHistoryRecord: Decodable, Equatable, Sendable {
   public let labelsRemoved: [LabelRemoved]?
 }
 
-extension GmailHistoryRecord {
+public extension GmailHistoryRecord {
   /// A message addition within this history record.
-  public struct MessageAdded: Decodable, Equatable, Sendable {
+  struct MessageAdded: Decodable, Equatable, Sendable {
     /// The message added to the mailbox.
     public let message: GmailMessage
   }
 
   /// A permanent message deletion within this history record.
-  public struct MessageDeleted: Decodable, Equatable, Sendable {
+  struct MessageDeleted: Decodable, Equatable, Sendable {
     /// The message deleted from the mailbox.
     public let message: GmailMessage
   }
 
   /// A label addition within this history record.
-  public struct LabelAdded: Decodable, Equatable, Sendable {
+  struct LabelAdded: Decodable, Equatable, Sendable {
     /// The message whose labels changed.
     public let message: GmailMessage
 
@@ -45,7 +45,7 @@ extension GmailHistoryRecord {
   }
 
   /// A label removal within this history record.
-  public struct LabelRemoved: Decodable, Equatable, Sendable {
+  struct LabelRemoved: Decodable, Equatable, Sendable {
     /// The message whose labels changed.
     public let message: GmailMessage
 

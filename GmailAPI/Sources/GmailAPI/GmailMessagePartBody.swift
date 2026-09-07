@@ -61,8 +61,8 @@ private extension GmailMessagePartBody {
   }
 }
 
-extension GmailMessagePartBody {
-  public enum ContentDecodingError: LocalizedError, Equatable {
+public extension GmailMessagePartBody {
+  enum ContentDecodingError: LocalizedError, Equatable {
     case invalidBase64URL
 
     public var errorDescription: String? {

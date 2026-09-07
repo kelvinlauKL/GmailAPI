@@ -23,8 +23,8 @@ public struct URLSessionGmailTransport: GmailTransport {
   }
 }
 
-extension URLSessionGmailTransport {
-  public enum TransportError: LocalizedError, Equatable {
+public extension URLSessionGmailTransport {
+  enum TransportError: LocalizedError, Equatable {
     case nonHTTPResponse
 
     public var errorDescription: String? {
