@@ -18,7 +18,8 @@ public struct GmailClient: Sendable {
 
   /// Fetches the authenticated account's mailbox profile.
   /// A rejected access token is invalidated, with one retry using newly requested credentials.
-  /// Other HTTP failures are returned without retrying. Provider and transport errors propagate.
+  /// Other HTTP failures return `RequestError.requestFailed` with a `GmailRequestFailure`.
+  /// Provider and transport errors propagate. Temporary failures are returned without retrying.
   public func profile() async throws -> GmailProfile {
     try await get(Constant.profileEndpoint)
   }
@@ -34,11 +35,10 @@ public struct GmailClient: Sendable {
   /// Fetches one page of mailbox changes after the supplied starting history ID.
   /// Pass the returned `nextPageToken` with the same starting ID and filters to fetch another page.
   /// Uses the same authentication retry and error handling as `profile()`.
-  /// An invalid or expired starting history ID can produce `RequestError.requestFailed(statusCode: 404)`.
-  /// The caller should perform a full sync when Gmail returns that status.
+  /// A `requestFailed` error with a `.historyExpired` category requires a full mailbox sync.
   public func listHistory(_ request: GmailHistoryListRequest) async throws -> GmailHistoryListResponse {
     let url = try requestURL(for: Constant.historyEndpoint, queryItems: request.queryItems)
-    return try await get(url)
+    return try await get(url, failureContext: .historyList)
   }
 
   /// Fetches a conversation with message bodies in Gmail's parsed MIME format.
@@ -111,7 +111,9 @@ public struct GmailClient: Sendable {
   }
 
   private func get<Response: Decodable>(
-    _ url: URL, canRetryAuthentication: Bool = true
+    _ url: URL,
+    failureContext: GmailRequestFailure.Context = .general,
+    canRetryAuthentication: Bool = true
   ) async throws -> Response {
     try Task.checkCancellation()
     let accessToken = try await tokenProvider.accessToken()
@@ -130,10 +132,16 @@ public struct GmailClient: Sendable {
     if response.statusCode == Constant.unauthorizedStatusCode {
       try await tokenProvider.invalidate(rejectedAccessToken: accessToken)
       guard canRetryAuthentication else { throw RequestError.reauthorizationRequired }
-      return try await get(url, canRetryAuthentication: false)
+      return try await get(url, failureContext: failureContext, canRetryAuthentication: false)
     }
     guard response.statusCode == Constant.successStatusCode else {
-      throw RequestError.requestFailed(statusCode: response.statusCode)
+      let errorResponse = try? JSONDecoder().decode(GmailErrorResponse.self, from: data)
+      throw RequestError.requestFailed(GmailRequestFailure(
+        statusCode: response.statusCode,
+        details: errorResponse?.error,
+        retryAfter: response.value(forHTTPHeaderField: "Retry-After"),
+        context: failureContext
+      ))
     }
     guard let decodedResponse = try? JSONDecoder().decode(Response.self, from: data) else {
       throw RequestError.invalidResponse
@@ -164,7 +172,7 @@ public extension GmailClient {
     case invalidAttachmentID
     case invalidAccessToken
     case reauthorizationRequired
-    case requestFailed(statusCode: Int)
+    case requestFailed(GmailRequestFailure)
     case invalidResponse
 
     public var errorDescription: String? {
@@ -175,7 +183,7 @@ public extension GmailClient {
       case .invalidAttachmentID: "The Gmail attachment ID is invalid."
       case .invalidAccessToken: "The credential provider returned an invalid access token."
       case .reauthorizationRequired: "Google sign-in is required."
-      case .requestFailed(let statusCode): "The Gmail request failed with HTTP status \(statusCode)."
+      case .requestFailed(let failure): failure.errorDescription
       case .invalidResponse: "Gmail returned an unreadable response."
       }
     }
@@ -188,7 +196,7 @@ public extension GmailClient {
       case .invalidAttachmentID: "The attachment ID was empty or was a dot path segment."
       case .invalidAccessToken: "The access token was empty or contained whitespace."
       case .reauthorizationRequired: "Gmail rejected the credentials after an authentication retry."
-      case .requestFailed: "Gmail did not return the expected successful HTTP status."
+      case .requestFailed(let failure): failure.failureReason
       case .invalidResponse: "The response did not match the expected Gmail data format."
       }
     }
@@ -201,7 +209,7 @@ public extension GmailClient {
       case .invalidAttachmentID: "Provide the original attachmentId returned in the message part body."
       case .invalidAccessToken: "Provide a current access token without whitespace or the Bearer prefix."
       case .reauthorizationRequired: "Sign in again and supply a provider with the new credentials."
-      case .requestFailed: "Check the HTTP status, account permissions, quota, and service availability before retrying."
+      case .requestFailed(let failure): failure.recoverySuggestion
       case .invalidResponse: "Retry the request and check the response format if the problem persists."
       }
     }

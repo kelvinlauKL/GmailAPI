@@ -128,7 +128,7 @@ struct GmailClientTests {
       _ = try await client.profile()
       Issue.record("Expected an HTTP failure.")
     } catch let error as GmailClient.RequestError {
-      #expect(error == .requestFailed(statusCode: statusCode))
+      #expect(error == .requestFailed(GmailRequestFailure(statusCode: statusCode)))
       let failureReason = try #require(error.failureReason)
       let recoverySuggestion = try #require(error.recoverySuggestion)
       #expect(!error.localizedDescription.contains(privateResponse))
@@ -137,6 +137,111 @@ struct GmailClientTests {
     }
     #expect(await transport.requests.count == 1)
     #expect(await tokenProvider.retrievalCount == 1)
+    #expect(await tokenProvider.invalidatedTokens.isEmpty)
+  }
+
+  @Test(arguments: [
+    (["userRateLimitExceeded"], GmailRequestFailure.Category.rateLimited, true),
+    (["dailyLimitExceeded"], .quotaExceeded, false),
+    (["userRateLimitExceeded", "domainPolicy"], .forbidden, false)
+  ])
+  func exposesClassifiedDiagnosticsWithoutRetrying(
+    reasons: [String], expectedCategory: GmailRequestFailure.Category, expectedRetryability: Bool
+  ) async throws {
+    let privateContent = "private-response-content"
+    let responseData = try JSONSerialization.data(withJSONObject: [
+      "error": [
+        "code": 500, "message": privateContent,
+        "errors": reasons.map { ["reason": $0, "message": privateContent] }
+      ]
+    ])
+    let tokenProvider = TokenProvider()
+    let transport = Transport(
+      statusCodes: [403, 200], responseBody: String(decoding: responseData, as: UTF8.self),
+      responseHeaders: ["retry-after": "120"]
+    )
+    let client = GmailClient(tokenProvider: tokenProvider, transport: transport)
+
+    do {
+      _ = try await client.profile()
+      Issue.record("Expected a classified HTTP failure.")
+    } catch GmailClient.RequestError.requestFailed(let failure) {
+      #expect(failure.statusCode == 403)
+      #expect(failure.details?.code == 500)
+      #expect(failure.details?.message == privateContent)
+      #expect(failure.details?.errors?.map(\.reason) == reasons)
+      #expect(failure.retryAfter == "120")
+      #expect(failure.context == .general)
+      #expect(failure.category == expectedCategory)
+      #expect(failure.isRetryable == expectedRetryability)
+      let error = GmailClient.RequestError.requestFailed(failure)
+      #expect(error.localizedDescription == failure.localizedDescription)
+      #expect(error.failureReason == failure.failureReason)
+      #expect(error.recoverySuggestion == failure.recoverySuggestion)
+      #expect(!error.localizedDescription.contains(privateContent))
+      #expect(error.failureReason?.contains(privateContent) == false)
+      #expect(error.recoverySuggestion?.contains(privateContent) == false)
+    }
+    #expect(await transport.requests.count == 1)
+    #expect(await tokenProvider.retrievalCount == 1)
+    #expect(await tokenProvider.invalidatedTokens.isEmpty)
+  }
+
+  @Test
+  func preservesExpiredHistoryContextAcrossAuthenticationRetry() async throws {
+    let tokenProvider = TokenProvider(tokens: ["rejected-token", "replacement-token"])
+    let transport = Transport(
+      statusCodes: [401, 404, 200], responseBody: #"{"error":{"code":404}}"#,
+      responseHeaders: ["Retry-After": "60"]
+    )
+    let client = GmailClient(tokenProvider: tokenProvider, transport: transport)
+    let options = try GmailHistoryListRequest(startHistoryId: "90", pageToken: "page+/=%2F")
+
+    do {
+      _ = try await client.listHistory(options)
+      Issue.record("Expected an expired history failure.")
+    } catch GmailClient.RequestError.requestFailed(let failure) {
+      #expect(failure.statusCode == 404)
+      #expect(failure.details?.code == 404)
+      #expect(failure.context == .historyList)
+      #expect(failure.category == .historyExpired)
+      #expect(!failure.isRetryable)
+      #expect(failure.retryAfter == "60")
+    }
+    let requests = await transport.requests
+    #expect(requests.count == 2)
+    #expect(requests.first?.url == requests.last?.url)
+    #expect(requests.map { $0.value(forHTTPHeaderField: "Authorization") } == [
+      "Bearer rejected-token", "Bearer replacement-token"
+    ])
+    #expect(await tokenProvider.retrievalCount == 2)
+    #expect(await tokenProvider.invalidatedTokens == ["rejected-token"])
+  }
+
+  @Test(arguments: [
+    "<html>Unavailable</html>", "{}", #"{"error":null}"#,
+    #"{"error":{"code":"403"}}"#,
+    #"{"error":{"code":403,"errors":[{"reason":null}]}}"#
+  ])
+  func preservesStatusAndRetryHeaderWhenErrorDiagnosticsAreUnreadable(responseBody: String) async throws {
+    let tokenProvider = TokenProvider()
+    let transport = Transport(
+      statusCodes: [403], responseBody: responseBody,
+      responseHeaders: ["Retry-After": "Wed, 21 Oct 2015 07:28:00 GMT"]
+    )
+    let client = GmailClient(tokenProvider: tokenProvider, transport: transport)
+
+    do {
+      _ = try await client.profile()
+      Issue.record("Expected an HTTP failure with unavailable diagnostics.")
+    } catch GmailClient.RequestError.requestFailed(let failure) {
+      #expect(failure.statusCode == 403)
+      #expect(failure.details == nil)
+      #expect(failure.retryAfter == "Wed, 21 Oct 2015 07:28:00 GMT")
+      #expect(failure.category == .forbidden)
+      #expect(!failure.isRetryable)
+    }
+    #expect(await transport.requests.count == 1)
     #expect(await tokenProvider.invalidatedTokens.isEmpty)
   }
 
@@ -319,7 +424,7 @@ struct GmailClientTests {
     let client = GmailClient(tokenProvider: tokenProvider, transport: transport)
     let options = try GmailThreadListRequest()
 
-    await #expect(throws: GmailClient.RequestError.requestFailed(statusCode: statusCode)) {
+    await #expect(throws: GmailClient.RequestError.requestFailed(GmailRequestFailure(statusCode: statusCode))) {
       try await client.listThreads(options)
     }
     #expect(await transport.requests.count == 1)
@@ -494,7 +599,8 @@ struct GmailClientTests {
     let client = GmailClient(tokenProvider: tokenProvider, transport: transport)
     let options = try GmailHistoryListRequest(startHistoryId: "90")
 
-    await #expect(throws: GmailClient.RequestError.requestFailed(statusCode: statusCode)) {
+    let expectedFailure = GmailRequestFailure(statusCode: statusCode, context: .historyList)
+    await #expect(throws: GmailClient.RequestError.requestFailed(expectedFailure)) {
       try await client.listHistory(options)
     }
     #expect(await transport.requests.count == 1)
@@ -600,7 +706,7 @@ struct GmailClientTests {
     let transport = Transport(statusCodes: [statusCode], responseBody: "{}")
     let client = GmailClient(tokenProvider: tokenProvider, transport: transport)
 
-    await #expect(throws: GmailClient.RequestError.requestFailed(statusCode: statusCode)) {
+    await #expect(throws: GmailClient.RequestError.requestFailed(GmailRequestFailure(statusCode: statusCode))) {
       try await client.thread(id: "thread-1")
     }
     #expect(await transport.requests.count == 1)
@@ -725,7 +831,7 @@ struct GmailClientTests {
     let transport = Transport(statusCodes: [statusCode], responseBody: "{}")
     let client = GmailClient(tokenProvider: tokenProvider, transport: transport)
 
-    await #expect(throws: GmailClient.RequestError.requestFailed(statusCode: statusCode)) {
+    await #expect(throws: GmailClient.RequestError.requestFailed(GmailRequestFailure(statusCode: statusCode))) {
       try await client.attachment(messageID: "message-1", attachmentID: "attachment-1")
     }
     #expect(await transport.requests.count == 1)
@@ -830,6 +936,7 @@ private extension GmailClientTests {
   actor Transport: GmailTransport {
     private let statusCodes: [Int]
     private var responseBody: String
+    private let responseHeaders: [String: String]
     private let failure: DependencyFailure?
     private let cancellationStage: CancellationStage?
     private(set) var requests: [URLRequest] = []
@@ -839,11 +946,13 @@ private extension GmailClientTests {
       responseBody: String = """
         {"emailAddress":"demo@example.com","messagesTotal":50,"threadsTotal":12,"historyId":"18446744073709551615"}
         """,
+      responseHeaders: [String: String] = [:],
       failure: DependencyFailure? = nil,
       cancellationStage: CancellationStage? = nil
     ) {
       self.statusCodes = statusCodes
       self.responseBody = responseBody
+      self.responseHeaders = responseHeaders
       self.failure = failure
       self.cancellationStage = cancellationStage
     }
@@ -862,7 +971,7 @@ private extension GmailClientTests {
       let url = try #require(request.url)
       let response = try #require(HTTPURLResponse(
         url: url, statusCode: statusCode,
-        httpVersion: nil, headerFields: nil
+        httpVersion: nil, headerFields: responseHeaders
       ))
       return (Data(responseBody.utf8), response)
     }
