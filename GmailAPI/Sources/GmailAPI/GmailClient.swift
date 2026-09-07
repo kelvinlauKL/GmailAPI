@@ -118,10 +118,34 @@ public struct GmailClient: Sendable {
 
   private func get<Response: Decodable>(
     _ url: URL,
-    failureContext: GmailRequestFailure.Context = .general,
-    retryCount: Int = 0,
-    hasRetriedAuthentication: Bool = false
+    failureContext: GmailRequestFailure.Context = .general
   ) async throws -> Response {
+    var retryCount = 0
+    var hasRetriedAuthentication = false
+    var result: Result<Response, AttemptFailure> = try await performAttempt(url, failureContext: failureContext)
+    while case .failure(let failure) = result {
+      switch failure {
+      case .rejectedAccessToken(let accessToken):
+        try await tokenProvider.invalidate(rejectedAccessToken: accessToken)
+        guard !hasRetriedAuthentication else { throw RequestError.reauthorizationRequired }
+        hasRetriedAuthentication = true
+      case .http(let requestFailure):
+        guard let retryPolicy, try await retryPolicy.waitBeforeRetry(after: requestFailure, retryCount: retryCount)
+        else { throw RequestError.requestFailed(requestFailure) }
+        retryCount += 1
+      case .transport(let error):
+        guard let retryPolicy, try await retryPolicy.waitBeforeRetry(after: error, retryCount: retryCount)
+        else { throw error }
+        retryCount += 1
+      }
+      result = try await performAttempt(url, failureContext: failureContext)
+    }
+    return try result.get()
+  }
+
+  private func performAttempt<Response: Decodable>(
+    _ url: URL, failureContext: GmailRequestFailure.Context
+  ) async throws -> Result<Response, AttemptFailure> {
     try Task.checkCancellation()
     let accessToken = try await tokenProvider.accessToken()
     try Task.checkCancellation()
@@ -140,22 +164,13 @@ public struct GmailClient: Sendable {
       (data, response) = try await transport.send(request)
     } catch {
       try Task.checkCancellation()
-      guard !(error is CancellationError), (error as? URLError)?.code != .cancelled,
-        let retryPolicy, try await retryPolicy.waitBeforeRetry(after: error, retryCount: retryCount)
+      guard !(error is CancellationError), (error as? URLError)?.code != .cancelled
       else { throw error }
-      return try await get(
-        url, failureContext: failureContext, retryCount: retryCount + 1,
-        hasRetriedAuthentication: hasRetriedAuthentication
-      )
+      return .failure(.transport(error))
     }
     try Task.checkCancellation()
     if response.statusCode == Constant.unauthorizedStatusCode {
-      try await tokenProvider.invalidate(rejectedAccessToken: accessToken)
-      guard !hasRetriedAuthentication else { throw RequestError.reauthorizationRequired }
-      return try await get(
-        url, failureContext: failureContext, retryCount: retryCount,
-        hasRetriedAuthentication: true
-      )
+      return .failure(.rejectedAccessToken(accessToken))
     }
     if response.statusCode != Constant.successStatusCode {
       let errorResponse = try? JSONDecoder().decode(GmailErrorResponse.self, from: data)
@@ -165,21 +180,23 @@ public struct GmailClient: Sendable {
         retryAfter: response.value(forHTTPHeaderField: "Retry-After"),
         context: failureContext
       )
-      guard let retryPolicy, try await retryPolicy.waitBeforeRetry(after: failure, retryCount: retryCount)
-      else { throw RequestError.requestFailed(failure) }
-      return try await get(
-        url, failureContext: failureContext, retryCount: retryCount + 1,
-        hasRetriedAuthentication: hasRetriedAuthentication
-      )
+      return .failure(.http(failure))
     }
     guard let decodedResponse = try? JSONDecoder().decode(Response.self, from: data) else {
       throw RequestError.invalidResponse
     }
-    return decodedResponse
+    return .success(decodedResponse)
   }
 }
 
 private extension GmailClient {
+  /// Internal outcomes for retry coordination; callers receive the original public errors.
+  enum AttemptFailure: Error {
+    case rejectedAccessToken(String)
+    case http(GmailRequestFailure)
+    case transport(any Error)
+  }
+
   enum Constant {
     static let profileEndpoint: URL = URL(string: "https://gmail.googleapis.com/gmail/v1/users/me/profile")!
     static let threadsEndpoint: URL = URL(string: "https://gmail.googleapis.com/gmail/v1/users/me/threads")!
