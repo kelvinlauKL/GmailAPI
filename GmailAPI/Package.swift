@@ -6,11 +6,14 @@ let package = Package(
   name: "GmailAPI",
   platforms: [.macOS(.v27)],
   products: [
-    .library(name: "GmailAPI", targets: ["GmailAPI"])
+    .library(name: "GmailAPI", targets: ["GmailAPI"]),
+    .library(name: "GmailSync", targets: ["GmailSync"])
   ],
   targets: [
     .target(name: "GmailAPI"),
-    .testTarget(name: "GmailAPITests", dependencies: ["GmailAPI"])
+    .target(name: "GmailSync", dependencies: ["GmailAPI"]),
+    .testTarget(name: "GmailAPITests", dependencies: ["GmailAPI"]),
+    .testTarget(name: "GmailSyncTests", dependencies: ["GmailSync"])
   ],
   swiftLanguageModes: [.v6]
 )
