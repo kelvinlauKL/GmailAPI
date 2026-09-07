@@ -219,8 +219,8 @@ struct GoogleOAuthTokenProviderTests {
   }
 }
 
-extension GoogleOAuthTokenProviderTests {
-  private actor TokenEndpoint: GmailTransport {
+private extension GoogleOAuthTokenProviderTests {
+  actor TokenEndpoint: GmailTransport {
     private(set) var requests: [URLRequest] = []
     private let tokenLifetime: Int
     private let firstResponseBody: String?

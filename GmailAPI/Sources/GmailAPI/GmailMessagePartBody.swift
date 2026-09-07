@@ -51,15 +51,17 @@ public struct GmailMessagePartBody: Decodable, Equatable, Sendable {
   }
 }
 
-extension GmailMessagePartBody {
-  private enum Constant {
+private extension GmailMessagePartBody {
+  enum Constant {
     static let base64URLAlphabet: CharacterSet = CharacterSet(
       charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
     )
     static let base64BlockLength: Int = 4
     static let invalidTrailingCharacterCount: Int = 1
   }
+}
 
+extension GmailMessagePartBody {
   public enum ContentDecodingError: LocalizedError, Equatable {
     case invalidBase64URL
 
